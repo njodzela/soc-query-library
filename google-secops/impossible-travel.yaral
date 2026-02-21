@@ -1,0 +1,189 @@
+/*
+ * Title:        Impossible Travel Detection
+ * Description:  Detects successive logins from geographically distant locations
+ *               within timeframes that make physical travel impossible, indicating
+ *               credential compromise or account sharing.
+ * MITRE ATT&CK: T1078 (Valid Accounts), T1078.004 (Cloud Accounts)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Authentication Events (Azure AD, Okta, Google Workspace, On-prem AD)
+ */
+
+// =============================================================================
+// Scenario 1: Successive logins from different countries within 2 hours
+// =============================================================================
+rule impossible_travel_successive_logins {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects successive successful logins from geographically distant locations within a timeframe that makes physical travel impossible. Compares login pairs from different countries/cities for the same user."
+    severity = "High"
+    mitre_attack = "T1078"
+
+  events:
+    $login1.metadata.event_type = "USER_LOGIN"
+    $login1.security_result.action = "ALLOW"
+    $login1.principal.user.userid = $user
+    $login1.principal.ip = $ip1
+    $login1.principal.location.country_or_region = $country1
+
+    $login2.metadata.event_type = "USER_LOGIN"
+    $login2.security_result.action = "ALLOW"
+    $login2.principal.user.userid = $user
+    $login2.principal.ip = $ip2
+    $login2.principal.location.country_or_region = $country2
+
+    $login1.principal.ip != $login2.principal.ip
+    $login1.principal.location.country_or_region != $login2.principal.location.country_or_region
+
+    $login1.metadata.event_timestamp.seconds < $login2.metadata.event_timestamp.seconds
+    $login2.metadata.event_timestamp.seconds - $login1.metadata.event_timestamp.seconds < 7200
+
+  match:
+    $user over 2h
+
+  condition:
+    #login1 > 0 and #login2 > 0
+
+  outcome:
+    $risk_score = 85
+    $locations = array_distinct($login1.principal.location.country_or_region)
+    $source_ips = array_distinct($login1.principal.ip)
+    $login_count = #login1 + #login2
+}
+
+// =============================================================================
+// Scenario 2: City-level impossible travel (same country, under 30 minutes)
+// =============================================================================
+rule impossible_travel_city_level {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects logins from different cities within the same country in an impossibly short timeframe (under 30 minutes). More granular than country-level detection."
+    severity = "High"
+    mitre_attack = "T1078"
+
+  events:
+    $login1.metadata.event_type = "USER_LOGIN"
+    $login1.security_result.action = "ALLOW"
+    $login1.principal.user.userid = $user
+    $login1.principal.ip = $ip1
+    $login1.principal.location.city = $city1
+
+    $login2.metadata.event_type = "USER_LOGIN"
+    $login2.security_result.action = "ALLOW"
+    $login2.principal.user.userid = $user
+    $login2.principal.ip = $ip2
+    $login2.principal.location.city = $city2
+
+    $login1.principal.ip != $login2.principal.ip
+    $login1.principal.location.city != $login2.principal.location.city
+
+    $login1.metadata.event_timestamp.seconds < $login2.metadata.event_timestamp.seconds
+    $login2.metadata.event_timestamp.seconds - $login1.metadata.event_timestamp.seconds < 1800
+
+  match:
+    $user over 1h
+
+  condition:
+    #login1 > 0 and #login2 > 0
+
+  outcome:
+    $risk_score = 80
+    $cities = array_distinct($login1.principal.location.city)
+    $ips = array_distinct($login1.principal.ip)
+}
+
+// =============================================================================
+// Scenario 3: VPN bypass — corporate VPN + simultaneous foreign login
+// =============================================================================
+rule impossible_travel_vpn_bypass {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects successful login from a foreign country immediately followed by or preceded by a corporate VPN login, suggesting credential compromise while VPN is in use."
+    severity = "Critical"
+    mitre_attack = "T1078.004"
+
+  events:
+    $vpn.metadata.event_type = "USER_LOGIN"
+    $vpn.security_result.action = "ALLOW"
+    $vpn.principal.user.userid = $user
+    $vpn.principal.location.country_or_region = $home_country
+
+    $foreign.metadata.event_type = "USER_LOGIN"
+    $foreign.security_result.action = "ALLOW"
+    $foreign.principal.user.userid = $user
+    $foreign.principal.location.country_or_region = $foreign_country
+
+    $vpn.principal.location.country_or_region != $foreign.principal.location.country_or_region
+
+    $vpn.metadata.event_timestamp.seconds < $foreign.metadata.event_timestamp.seconds
+    $foreign.metadata.event_timestamp.seconds - $vpn.metadata.event_timestamp.seconds < 300
+
+  match:
+    $user over 1h
+
+  condition:
+    #vpn > 0 and #foreign > 0
+
+  outcome:
+    $risk_score = 95
+    $home_locations = array_distinct($vpn.principal.location.country_or_region)
+    $foreign_locations = array_distinct($foreign.principal.location.country_or_region)
+    $foreign_ips = array_distinct($foreign.principal.ip)
+}
+
+// =============================================================================
+// Scenario 4: First-time login from a new country
+// =============================================================================
+rule impossible_travel_new_country_first_login {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects first-time login from a country never seen before for this user. Baseline comparison requires enrichment or reference list of user-to-country mappings."
+    severity = "Medium"
+    mitre_attack = "T1078"
+
+  events:
+    $login.metadata.event_type = "USER_LOGIN"
+    $login.security_result.action = "ALLOW"
+    $login.principal.user.userid = $user
+    $login.principal.location.country_or_region = $country
+    $login.principal.ip = $ip
+
+    // Not a known VPN/proxy IP (customize with your VPN egress IPs)
+    not net.ip_in_range_cidr($login.principal.ip, "198.51.100.0/24")
+
+  match:
+    $user over 24h
+
+  condition:
+    #login > 0
+
+  outcome:
+    $risk_score = 60
+    $countries = array_distinct($login.principal.location.country_or_region)
+    $ips_used = array_distinct($login.principal.ip)
+    $login_count = #login
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Maintain a reference list of corporate VPN egress IPs and exclude them from geo comparisons
+ * - Adjust the 2-hour window (7200s) based on your org's travel patterns
+ * - Exclude known cloud proxy IPs (Zscaler, Cloudflare WARP) that show varied geolocations
+ * - For city-level detection, tune the 30-minute window based on metro area sizes
+ * - Build per-user country baselines and alert only on NEW countries
+ * - Consider time zone context: a login at 3 AM local time + foreign country = higher risk
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - VPN split-tunneling where corporate and personal traffic egress from different locations
+ * - Cloud proxy services (Zscaler, Netskope) that route traffic through global PoPs
+ * - Mobile users on cellular networks with poor geolocation accuracy
+ * - Users with dual SIM or eSIM (personal + business) in different regions
+ * - Corporate travel + hotel VPN = legitimate dual-country access
+ * - Shared accounts (should be flagged anyway for security hygiene)
+ */

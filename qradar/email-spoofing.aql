@@ -1,0 +1,89 @@
+-- ============================================================
+-- Title: Email Spoofing Detection
+-- Description: Detects spoofed emails including SPF/DKIM/DMARC
+--              failures, display name impersonation, and header anomalies.
+-- MITRE ATT&CK: T1566.001 (Spearphishing Attachment),
+--               T1566.002 (Spearphishing Link)
+-- Severity: High
+-- Data Sources: Email Gateway Logs, SMTP Logs, DMARC Reports
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Emails failing SPF, DKIM, and DMARC ===
+-- Identifies inbound emails that fail authentication mechanisms
+SELECT
+    starttime AS event_time,
+    sourceip AS sender_ip,
+    GEOIP(sourceip, 'country') AS sender_country,
+    UTF8(payload) AS raw_event,
+    COUNT(*) AS failed_emails
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Email%Gateway%'
+    AND (UTF8(payload) ILIKE '%spf=fail%'
+         OR UTF8(payload) ILIKE '%dkim=fail%'
+         OR UTF8(payload) ILIKE '%dmarc=fail%')
+GROUP BY sourceip, starttime, UTF8(payload)
+HAVING COUNT(*) > 3
+ORDER BY failed_emails DESC
+LAST 24 HOURS
+
+-- === Scenario 2: Display name spoofing of known executives ===
+-- Detects emails claiming to be from executives via external domains
+SELECT
+    starttime AS event_time,
+    sourceip AS sender_ip,
+    UTF8(payload) AS raw_event,
+    LOGSOURCENAME(logsourceid) AS log_source
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Email%Gateway%'
+    AND (UTF8(payload) ILIKE '%From:%CEO Name%'
+         OR UTF8(payload) ILIKE '%From:%CFO Name%'
+         OR UTF8(payload) ILIKE '%From:%CTO Name%')
+    AND UTF8(payload) NOT ILIKE '%@yourdomain.com%'
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- === Scenario 3: Emails from known lookalike domains ===
+-- Uses reference set of lookalike domains to flag impersonation
+SELECT
+    starttime AS event_time,
+    sourceip AS sender_ip,
+    UTF8(payload) AS raw_event,
+    LOGSOURCENAME(logsourceid) AS log_source
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Email%Gateway%'
+    AND REFERENCESETCONTAINS('Lookalike_Domains', sourceip)
+ORDER BY event_time DESC
+LAST 24 HOURS
+-- Note: Populate reference set 'Lookalike_Domains' using dnstwist output
+
+-- === Scenario 4: Reply-To header mismatch ===
+-- Flags emails where Reply-To domain differs from From domain
+SELECT
+    starttime AS event_time,
+    sourceip AS sender_ip,
+    UTF8(payload) AS raw_event,
+    LOGSOURCENAME(logsourceid) AS log_source
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Email%Gateway%'
+    AND UTF8(payload) ILIKE '%Reply-To:%'
+    AND UTF8(payload) IREGEXP 'Reply-To:.*@(?!yourdomain\.com)'
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Populate reference sets with VIP names and lookalike domains
+-- - Replace "yourdomain.com" with actual company domains
+-- - Create custom properties to parse email header fields
+-- - Integrate with threat intelligence feeds for phishing domains
+-- - Exclude known mailing lists that modify From headers
+--
+-- FALSE POSITIVES:
+-- - Forwarded emails through external mailing lists
+-- - Marketing platforms sending on behalf of your domain
+-- - Newly onboarded partners without DMARC alignment
+-- - Email forwarding chains breaking DKIM
+-- - Legitimate third-party email services
+-- ============================================================

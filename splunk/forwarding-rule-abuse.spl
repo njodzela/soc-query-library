@@ -1,0 +1,89 @@
+` ============================================================
+` Title: Forwarding Rule Abuse Detection
+` Description: Detects creation or modification of mailbox forwarding
+`              rules that could be used to exfiltrate email data to
+`              external addresses or attacker-controlled domains.
+` MITRE ATT&CK: T1114.003 (Email Forwarding Rule), T1114 (Email Collection)
+` Severity: High
+` Data Sources: O365 Management Activity, Exchange Message Tracking,
+`              PowerShell Script Block Logging, Windows Security Events
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: New inbox rule forwarding to external domain ===
+` Detects creation of inbox rules that forward or redirect to external addresses
+index=o365 sourcetype="o365:management:activity" Operation IN ("New-InboxRule", "Set-InboxRule")
+| spath input=Parameters
+| where isnotnull(ForwardTo) OR isnotnull(ForwardAsAttachmentTo) OR isnotnull(RedirectTo)
+| eval forward_target=coalesce(ForwardTo, ForwardAsAttachmentTo, RedirectTo)
+| rex field=forward_target "(?<target_domain>@[\w\.\-]+)"
+| lookup internal_domains.csv domain AS target_domain OUTPUT is_internal
+| where is_internal!="true"
+| stats count by UserId, Operation, forward_target, target_domain, ClientIP, _time
+| sort -_time
+
+` === Scenario 2: Exchange transport rule manipulation ===
+` Detects creation or modification of transport rules that BCC or redirect mail
+index=o365 sourcetype="o365:management:activity" Operation IN ("New-TransportRule", "Set-TransportRule", "Enable-TransportRule")
+| spath input=Parameters
+| eval action_type=case(
+    like(Parameters, "%BlindCopyTo%"), "BCC_redirect",
+    like(Parameters, "%RedirectMessageTo%"), "Redirect",
+    like(Parameters, "%CopyTo%"), "Copy",
+    true(), "Other")
+| where action_type!="Other"
+| stats count values(Parameters) as rule_details by UserId, Operation, action_type, ClientIP, _time
+| sort -_time
+
+` === Scenario 3: PowerShell commands creating forwarding rules ===
+` Detects PowerShell usage of Set-Mailbox or New-InboxRule with forwarding
+index=windows sourcetype="WinEventLog:Microsoft-Windows-PowerShell/Operational" EventCode=4104
+| search ScriptBlockText IN ("*Set-Mailbox*ForwardingSmtpAddress*", "*Set-Mailbox*ForwardingAddress*", "*New-InboxRule*ForwardTo*", "*New-InboxRule*RedirectTo*")
+| rex field=ScriptBlockText "(?i)(?:ForwardingSmtpAddress|ForwardTo|RedirectTo)\s+[\"\']?(?<target_address>[^\s\"\']+)"
+| stats count values(ScriptBlockText) as commands by Computer, UserID, target_address, _time
+| sort -_time
+
+` === Scenario 4: Suspicious forwarding rule created after initial compromise ===
+` Correlates recent sign-in anomalies with subsequent forwarding rule creation
+index=o365 sourcetype="o365:management:activity" Operation IN ("New-InboxRule", "Set-InboxRule")
+| spath input=Parameters
+| where isnotnull(ForwardTo) OR isnotnull(ForwardAsAttachmentTo) OR isnotnull(RedirectTo)
+| eval forward_target=coalesce(ForwardTo, ForwardAsAttachmentTo, RedirectTo)
+| join UserId type=inner [
+    search index=o365 sourcetype="o365:management:activity" Operation="UserLoggedIn"
+    | where like(ClientIP, "%.%")
+    | iplocation ClientIP
+    | where Country!="United States"
+    | rename UserId as UserId
+    | dedup UserId
+]
+| table _time, UserId, Operation, forward_target, ClientIP, Country
+| sort -_time
+
+` === Scenario 5: Bulk forwarding rule changes across multiple mailboxes ===
+` Detects a single admin or compromised account modifying rules on many mailboxes
+index=o365 sourcetype="o365:management:activity" Operation IN ("New-InboxRule", "Set-InboxRule", "Set-Mailbox")
+| spath input=Parameters
+| where isnotnull(ForwardTo) OR isnotnull(ForwardAsAttachmentTo) OR isnotnull(ForwardingSmtpAddress)
+| bin _time span=1h
+| stats dc(UserId) as affected_mailboxes count as total_changes values(UserId) as mailboxes by ActorIpAddress, _time
+| where affected_mailboxes > 3
+| sort -affected_mailboxes
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Maintain an internal_domains.csv lookup with all legitimate
+`   company domains to filter out internal forwarding
+` - Exclude known IT automation accounts that manage mail rules
+` - Adjust the bulk threshold (>3 mailboxes) based on admin norms
+` - Consider adding geolocation enrichment on ClientIP
+` - Create a whitelist for approved external forwarding targets
+`
+` FALSE POSITIVES:
+` - IT administrators configuring forwarding for departing employees
+` - Users setting up legitimate personal forwarding (policy-dependent)
+` - Migration tools that reconfigure mail rules in bulk
+` - Shared mailbox management operations
+` - Auto-forwarding configured by approved third-party integrations
+` ============================================================

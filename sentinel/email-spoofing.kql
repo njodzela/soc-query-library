@@ -1,0 +1,89 @@
+// ============================================================
+// Title: Email Spoofing Detection
+// Description: Detects spoofed emails including SPF/DKIM/DMARC failures,
+//              display name impersonation, and lookalike domains.
+// MITRE ATT&CK: T1566.001 (Spearphishing Attachment),
+//               T1566.002 (Spearphishing Link)
+// Severity: High
+// Data Sources: EmailEvents, EmailUrlInfo, EmailAttachmentInfo
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Emails failing SPF, DKIM, and DMARC ===
+// Identifies inbound emails that fail authentication checks
+EmailEvents
+| where TimeGenerated > ago(24h)
+| where EmailDirection == "Inbound"
+| where AuthenticationDetails has "spf=fail" or AuthenticationDetails has "dkim=fail"
+    or AuthenticationDetails has "dmarc=fail" or AuthenticationDetails has "compauth=fail"
+| extend SenderDomain = tostring(split(SenderFromAddress, "@")[1])
+| summarize
+    FailedEmails = count(),
+    UniqueRecipients = dcount(RecipientEmailAddress),
+    Subjects = make_set(Subject, 10)
+    by SenderDomain, SenderFromAddress, AuthenticationDetails
+| where FailedEmails > 3
+| sort by FailedEmails desc
+
+// === Scenario 2: Display name spoofing of VIP users ===
+// Detects emails using executive names from external domains
+let VIPNames = datatable(DisplayName:string, ExpectedDomain:string) [
+    "CEO Name", "yourdomain.com",
+    "CFO Name", "yourdomain.com",
+    "CTO Name", "yourdomain.com"
+    // Add your VIP users here
+];
+EmailEvents
+| where TimeGenerated > ago(24h)
+| where EmailDirection == "Inbound"
+| extend SenderDomain = tostring(split(SenderFromAddress, "@")[1])
+| join kind=inner VIPNames on $left.SenderDisplayName == $right.DisplayName
+| where SenderDomain != ExpectedDomain
+| project TimeGenerated, SenderDisplayName, SenderFromAddress, SenderDomain,
+    ExpectedDomain, RecipientEmailAddress, Subject
+| sort by TimeGenerated desc
+
+// === Scenario 3: Lookalike domain detection ===
+// Uses string distance to find domains similar to your own
+let ProtectedDomains = dynamic(["yourdomain.com", "yourcompany.com"]);
+EmailEvents
+| where TimeGenerated > ago(24h)
+| where EmailDirection == "Inbound"
+| extend SenderDomain = tostring(split(SenderFromAddress, "@")[1])
+| where SenderDomain !in (ProtectedDomains)
+| mv-expand ProtectedDomain = ProtectedDomains
+| extend EditDistance = indexof(SenderDomain, tostring(ProtectedDomain))
+| where strlen(SenderDomain) between (strlen(tostring(ProtectedDomain)) - 2 .. strlen(tostring(ProtectedDomain)) + 3)
+| where SenderDomain has_any (ProtectedDomains) or SenderDomain matches regex @"you[r]?d[o0]main"
+| summarize Count = count(), Recipients = make_set(RecipientEmailAddress, 10) by SenderDomain, SenderFromAddress
+| sort by Count desc
+
+// === Scenario 4: Reply-To header mismatch ===
+// Flags emails where Reply-To domain differs from sender domain
+EmailEvents
+| where TimeGenerated > ago(24h)
+| where EmailDirection == "Inbound"
+| where isnotempty(SenderFromAddress)
+| extend SenderDomain = tostring(split(SenderFromAddress, "@")[1])
+| extend Headers = parse_json(InternetMessageHeaders)
+// Check for mismatched reply-to in raw headers when available
+| where AdditionalFields has "reply-to" and not(AdditionalFields has SenderDomain)
+| project TimeGenerated, SenderFromAddress, SenderDomain, RecipientEmailAddress, Subject, AdditionalFields
+| sort by TimeGenerated desc
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Populate VIPNames with all executives and finance personnel
+// - Add your actual domains to ProtectedDomains
+// - Use dnstwist or similar tools to pre-generate lookalike list
+// - Correlate with threat intelligence for known phishing domains
+// - Exclude known mailing lists that modify From headers
+//
+// FALSE POSITIVES:
+// - Forwarded emails through external mailing lists
+// - Marketing platforms sending on behalf of your domain
+// - Partner organizations with similar domain names
+// - Email forwarding that breaks DKIM
+// - Newly configured external senders not yet in SPF
+// ============================================================

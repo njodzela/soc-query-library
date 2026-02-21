@@ -1,0 +1,109 @@
+-- ============================================================
+-- Title: Routine Threat Hunting Queries
+-- Description: Proactive hunting queries for persistence mechanisms,
+--              unusual services, rare processes, and suspicious activity.
+-- MITRE ATT&CK: T1053 (Scheduled Task/Job), T1547 (Boot/Logon Autostart),
+--               T1105 (Ingress Tool Transfer), T1543 (Create/Modify System Process)
+-- Severity: Medium
+-- Data Sources: Windows Security Events, System Events, Firewall, DNS
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: New scheduled tasks created recently ===
+-- Hunts for schtasks.exe usage with /create flag
+SELECT
+    starttime AS event_time,
+    sourceip AS host,
+    username,
+    UTF8(payload) AS raw_event
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Windows%Security%'
+    AND "EventID" = '4688'
+    AND UTF8(payload) ILIKE '%schtasks%'
+    AND UTF8(payload) ILIKE '%/create%'
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- === Scenario 2: New Windows services installed ===
+-- Identifies newly installed services with suspicious paths
+SELECT
+    starttime AS event_time,
+    sourceip AS host,
+    UTF8(payload) AS raw_event,
+    LOGSOURCENAME(logsourceid) AS log_source
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Windows%System%'
+    AND "EventID" = '7045'
+    AND (UTF8(payload) ILIKE '%cmd%' OR UTF8(payload) ILIKE '%powershell%'
+         OR UTF8(payload) ILIKE '%\\temp\\%' OR UTF8(payload) ILIKE '%\\appdata\\%'
+         OR UTF8(payload) ILIKE '%\\users\\public\\%' OR UTF8(payload) ILIKE '%wscript%')
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- === Scenario 3: Startup folder file creation ===
+-- Detects files placed in startup directories
+SELECT
+    starttime AS event_time,
+    sourceip AS host,
+    username,
+    UTF8(payload) AS raw_event
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Sysmon%'
+    AND "EventID" = '11'
+    AND (UTF8(payload) ILIKE '%Start Menu\\Programs\\Startup%'
+         OR UTF8(payload) ILIKE '%\\Startup\\%')
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- === Scenario 4: Unusual outbound network connections ===
+-- Finds processes making connections to rare external destinations
+SELECT
+    sourceip AS internal_host,
+    destinationip AS external_ip,
+    GEOIP(destinationip, 'country') AS dest_country,
+    destinationport AS dest_port,
+    COUNT(*) AS connection_count,
+    COUNT(DISTINCT sourceip) AS source_count
+FROM events
+WHERE category = 'Firewall'
+    AND destinationip NOT ILIKE '10.%'
+    AND destinationip NOT ILIKE '172.16.%'
+    AND destinationip NOT ILIKE '192.168.%'
+    AND destinationport NOT IN (80, 443)
+GROUP BY sourceip, destinationip, destinationport
+HAVING COUNT(DISTINCT sourceip) < 3
+ORDER BY connection_count ASC
+LAST 24 HOURS
+
+-- === Scenario 5: DNS queries to rare or suspicious domains ===
+-- Hunts for DNS queries to uncommon or newly seen domains
+SELECT
+    sourceip AS host,
+    UTF8(payload) AS dns_query,
+    COUNT(*) AS query_count,
+    MIN(starttime) AS first_seen,
+    MAX(starttime) AS last_seen
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%DNS%'
+    AND category = 'DNS'
+GROUP BY sourceip, UTF8(payload)
+HAVING COUNT(*) < 3
+ORDER BY query_count ASC
+LAST 24 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Schedule these queries as daily or weekly saved searches
+-- - Use reference sets for known-good services and processes
+-- - Build baselines over 30+ days before tuning
+-- - Correlate findings with threat intelligence reference sets
+-- - Create custom rules for the highest-fidelity scenarios
+--
+-- FALSE POSITIVES:
+-- - Software deployments installing new services (patch cycles)
+-- - Admin scripts creating scheduled tasks via GPO
+-- - Legitimate DNS to CDN or cloud infrastructure
+-- - Windows Update and telemetry services
+-- - Development and testing environments
+-- ============================================================

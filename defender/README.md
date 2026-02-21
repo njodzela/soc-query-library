@@ -2,7 +2,7 @@
 
 ## Overview
 
-This directory contains 10 Advanced Hunting queries written in **KQL** for Microsoft 365 Defender. Each query maps to a MITRE ATT&CK tactic and includes multiple detection scenarios, tuning guidance, and false positive documentation.
+This directory contains 16 Advanced Hunting queries written in **KQL** for Microsoft 365 Defender. Each query maps to a MITRE ATT&CK tactic and includes multiple detection scenarios, tuning guidance, and false positive documentation.
 
 ## Platform Setup
 
@@ -65,6 +65,12 @@ This directory contains 10 Advanced Hunting queries written in **KQL** for Micro
 | `credential-access.kql` | Credential Access (T1003) | Critical |
 | `defense-evasion.kql` | Defense Evasion (T1070) | High |
 | `reconnaissance.kql` | Reconnaissance (T1595) | Medium |
+| `forwarding-rule-abuse.kql` | Collection (T1114) | High |
+| `impossible-travel.kql` | Initial Access (T1078) | High |
+| `spam-bot-detection.kql` | Initial Access (T1078) | High |
+| `email-spoofing.kql` | Initial Access (T1566) | High |
+| `anomalous-process-execution.kql` | Execution (T1059) | High |
+| `routine-threat-hunting.kql` | Persistence (T1053) | Medium |
 
 ## Author
 

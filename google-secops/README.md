@@ -2,7 +2,7 @@
 
 ## Overview
 
-This directory contains 10 detection rules written in **YARA-L 2.0** for Google SecOps (formerly Chronicle). Each rule maps to a MITRE ATT&CK tactic and includes multiple detection scenarios, tuning guidance, and false positive documentation.
+This directory contains 16 detection rules written in **YARA-L 2.0** for Google SecOps (formerly Chronicle). Each rule maps to a MITRE ATT&CK tactic and includes multiple detection scenarios, tuning guidance, and false positive documentation.
 
 ## Platform Setup
 
@@ -50,6 +50,12 @@ This directory contains 10 detection rules written in **YARA-L 2.0** for Google 
 | Credential Access | UDM Process Events, Windows Security Logs |
 | Defense Evasion | UDM Process Events, Sysmon, AV Logs |
 | Reconnaissance | UDM Network Events, DNS Logs, Firewall Logs |
+| Forwarding Rule Abuse | UDM Email Events, Office 365 Audit Logs, Google Workspace Admin Logs |
+| Impossible Travel | UDM Authentication Events (Azure AD, Okta, Google Workspace) |
+| Spam Bot Detection | UDM Email Events, Mail Gateway Logs, SMTP Relay Logs |
+| Email Spoofing | UDM Email Events, Mail Gateway Logs, DMARC Reports |
+| Anomalous Process Execution | UDM Process Events, EDR Telemetry, Sysmon |
+| Routine Threat Hunting | UDM Process Events, File Events, Network Events |
 
 ### Rule Severity Levels
 - **Critical** — Immediate analyst review required
@@ -71,6 +77,12 @@ This directory contains 10 detection rules written in **YARA-L 2.0** for Google 
 | `credential-access.yaral` | Credential Access (T1003) | Critical |
 | `defense-evasion.yaral` | Defense Evasion (T1070) | High |
 | `reconnaissance.yaral` | Reconnaissance (T1595) | Medium |
+| `forwarding-rule-abuse.yaral` | Collection (T1114) | High |
+| `impossible-travel.yaral` | Initial Access (T1078) | High |
+| `spam-bot-detection.yaral` | Initial Access (T1078) | High |
+| `email-spoofing.yaral` | Initial Access (T1566) | High |
+| `anomalous-process-execution.yaral` | Execution (T1059) | High |
+| `routine-threat-hunting.yaral` | Persistence (T1053) | Medium |
 
 ## Author
 

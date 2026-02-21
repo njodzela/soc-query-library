@@ -1,0 +1,97 @@
+// ============================================================
+// Title: Impossible Travel Detection
+// Description: Detects user sign-ins from geographically distant
+//              locations within timeframes that make physical travel
+//              impossible, indicating credential compromise.
+// MITRE ATT&CK: T1078 (Valid Accounts), T1078.004 (Cloud Accounts)
+// Severity: High
+// Data Sources: SigninLogs, AADNonInteractiveUserSignInLogs
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Interactive sign-ins from different countries within 1 hour ===
+// Compares successive sign-in locations per user
+let TimeWindow = 1h;
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == 0  // Successful logins only
+| project TimeGenerated, UserPrincipalName, IPAddress, Location,
+    City = tostring(LocationDetails.city),
+    State = tostring(LocationDetails.state),
+    Country = tostring(LocationDetails.countryOrRegion),
+    Latitude = toreal(LocationDetails.geoCoordinates.latitude),
+    Longitude = toreal(LocationDetails.geoCoordinates.longitude)
+| sort by UserPrincipalName asc, TimeGenerated asc
+| serialize
+| extend PrevTime = prev(TimeGenerated, 1), PrevCountry = prev(Country, 1),
+    PrevCity = prev(City, 1), PrevUser = prev(UserPrincipalName, 1),
+    PrevLat = prev(Latitude, 1), PrevLon = prev(Longitude, 1),
+    PrevIP = prev(IPAddress, 1)
+| where UserPrincipalName == PrevUser
+| where Country != PrevCountry
+| extend TimeDiffMinutes = datetime_diff('minute', TimeGenerated, PrevTime)
+| where TimeDiffMinutes between (1 .. 60)
+| extend TravelPath = strcat(PrevCity, ", ", PrevCountry, " → ", City, ", ", Country)
+| project TimeGenerated, UserPrincipalName, TravelPath, TimeDiffMinutes, IPAddress, PrevIP
+| sort by TimeGenerated desc
+
+// === Scenario 2: Distance-based impossible travel using coordinates ===
+// Calculates approximate distance and required speed
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == 0
+| extend Lat = toreal(LocationDetails.geoCoordinates.latitude),
+    Lon = toreal(LocationDetails.geoCoordinates.longitude),
+    City = tostring(LocationDetails.city),
+    Country = tostring(LocationDetails.countryOrRegion)
+| sort by UserPrincipalName asc, TimeGenerated asc
+| serialize
+| extend PrevTime = prev(TimeGenerated, 1), PrevLat = prev(Lat, 1),
+    PrevLon = prev(Lon, 1), PrevUser = prev(UserPrincipalName, 1),
+    PrevIP = prev(IPAddress, 1)
+| where UserPrincipalName == PrevUser and isnotnull(PrevLat)
+| extend TimeDiffHours = datetime_diff('second', TimeGenerated, PrevTime) / 3600.0
+| where TimeDiffHours > 0
+| extend DistanceKm = 6371 * 2 * asin(sqrt(
+    pow(sin(radians((Lat - PrevLat) / 2)), 2) +
+    cos(radians(PrevLat)) * cos(radians(Lat)) *
+    pow(sin(radians((Lon - PrevLon) / 2)), 2)))
+| extend RequiredSpeedKmh = DistanceKm / TimeDiffHours
+| where RequiredSpeedKmh > 900 and DistanceKm > 500
+| project TimeGenerated, UserPrincipalName, DistanceKm = round(DistanceKm, 0),
+    TimeDiffHours = round(TimeDiffHours, 2), RequiredSpeedKmh = round(RequiredSpeedKmh, 0),
+    IPAddress, PrevIP
+| sort by RequiredSpeedKmh desc
+
+// === Scenario 3: Non-interactive sign-ins with impossible travel ===
+// Checks service tokens and app sign-ins for geo anomalies
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == 0
+| extend Country = tostring(LocationDetails.countryOrRegion),
+    City = tostring(LocationDetails.city)
+| sort by UserPrincipalName asc, TimeGenerated asc
+| serialize
+| extend PrevTime = prev(TimeGenerated, 1), PrevCountry = prev(Country, 1),
+    PrevUser = prev(UserPrincipalName, 1), PrevIP = prev(IPAddress, 1)
+| where UserPrincipalName == PrevUser and Country != PrevCountry
+| extend TimeDiffMin = datetime_diff('minute', TimeGenerated, PrevTime)
+| where TimeDiffMin between (1 .. 60)
+| project TimeGenerated, UserPrincipalName, PrevCountry, Country, TimeDiffMin, IPAddress, PrevIP, AppDisplayName
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Exclude known VPN/proxy egress IPs (Zscaler, corporate VPN pools)
+// - Whitelist users who regularly use VPN across regions
+// - Adjust speed threshold (900 km/h ≈ commercial flight max)
+// - Add IP reputation enrichment for flagged addresses
+// - Filter out known cloud proxy services by ASN
+//
+// FALSE POSITIVES:
+// - VPN services with exit nodes in multiple countries
+// - Cloud access security brokers with distributed egress points
+// - Mobile users switching between WiFi and cellular networks
+// - IP geolocation inaccuracies, especially for mobile carriers
+// - Shared accounts used by multiple people
+// ============================================================

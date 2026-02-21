@@ -1,0 +1,103 @@
+// =============================================================================
+// Title:        Forwarding Rule Abuse
+// Description:  Detects creation or modification of mailbox forwarding rules
+//               that redirect email to external addresses, enabling persistent
+//               email collection after account compromise.
+// MITRE ATT&CK: T1114.003 (Email Collection: Email Forwarding Rule)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  CloudAppEvents, EmailEvents, DeviceProcessEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: Inbox rule creation via audit logs (O365)
+// Detects New-InboxRule, Set-InboxRule, UpdateInboxRules operations
+// -----------------------------------------------------------------------------
+CloudAppEvents
+| where Timestamp > ago(24h)
+| where ActionType in ("New-InboxRule", "Set-InboxRule", "UpdateInboxRules",
+    "Set-Mailbox")
+| where RawEventData has_any ("ForwardTo", "RedirectTo",
+    "ForwardingSmtpAddress", "ForwardingAddress")
+| extend ForwardTarget = tostring(parse_json(RawEventData).Parameters)
+| project Timestamp, AccountDisplayName, AccountObjectId, ActionType,
+    ForwardTarget, IPAddress, City, CountryCode
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: PowerShell-based forwarding rule creation
+// Detects command-line creation of Exchange forwarding rules
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where FileName in~ ("powershell.exe", "pwsh.exe")
+| where ProcessCommandLine has_any ("New-InboxRule", "Set-InboxRule",
+    "Set-Mailbox", "Set-TransportRule", "New-TransportRule")
+| where ProcessCommandLine has_any ("ForwardTo", "RedirectTo",
+    "ForwardingSmtpAddress", "ForwardingAddress", "RedirectMessageTo")
+| project Timestamp, DeviceName, AccountName, FileName,
+    ProcessCommandLine, InitiatingProcessFileName
+| extend AlertSeverity = "Critical"
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Forwarding to external (non-corporate) domains
+// Filters inbox rule events where target is outside the organization
+// -----------------------------------------------------------------------------
+CloudAppEvents
+| where Timestamp > ago(24h)
+| where ActionType in ("New-InboxRule", "Set-InboxRule", "Set-Mailbox")
+| where RawEventData has_any ("ForwardTo", "RedirectTo", "ForwardingSmtpAddress")
+// Parse the forwarding target
+| extend Parameters = tostring(parse_json(RawEventData).Parameters)
+// Exclude your corporate domains — customize these
+| where Parameters !has "@corp.example.com"
+    and Parameters !has "@example.com"
+| project Timestamp, AccountDisplayName, ActionType, Parameters,
+    IPAddress, City, CountryCode
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 4: Bulk forwarding rule modifications across multiple mailboxes
+// Single admin/actor modifying rules on 3+ mailboxes in 1 hour
+// -----------------------------------------------------------------------------
+CloudAppEvents
+| where Timestamp > ago(1h)
+| where ActionType in ("New-InboxRule", "Set-InboxRule", "Set-Mailbox")
+| where RawEventData has_any ("ForwardTo", "RedirectTo", "ForwardingSmtpAddress")
+| extend TargetMailbox = tostring(parse_json(RawEventData).ObjectId)
+| summarize
+    ModifiedMailboxes = dcount(TargetMailbox),
+    MailboxList = make_set(TargetMailbox, 20),
+    Actions = make_set(ActionType),
+    FirstAction = min(Timestamp),
+    LastAction = max(Timestamp)
+    by AccountDisplayName, IPAddress
+| where ModifiedMailboxes >= 3
+| extend AlertSeverity = "Critical"
+| project AccountDisplayName, IPAddress, ModifiedMailboxes, MailboxList,
+    Actions, FirstAction, LastAction, AlertSeverity
+| sort by ModifiedMailboxes desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Replace @corp.example.com / @example.com with your actual corporate domains
+// - Exclude known admin service accounts that legitimately manage transport rules
+// - For Scenario 2, add exclusions for IT automation tools (Ansible, SCCM)
+// - Adjust bulk modification threshold (3+) based on admin team size
+// - Consider adding geo-context: forwarding rule created from unusual location = higher risk
+// - Correlate with sign-in risk events: new IP + forwarding rule = likely compromise
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - IT admins configuring shared mailbox forwarding during onboarding/offboarding
+// - Migration tools creating temporary forwarding rules
+// - Users forwarding to personal email during approved transitions
+// - HR-configured forwarding for departing employees
+// - Compliance/legal forwarding to archival services
+// - Auto-forwarding configured by O365 admin for distribution lists
+// =============================================================================

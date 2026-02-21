@@ -1,0 +1,161 @@
+/*
+ * Title:        Forwarding Rule Abuse
+ * Description:  Detects creation or modification of mailbox forwarding rules
+ *               that redirect email to external addresses, enabling persistent
+ *               email collection after account compromise.
+ * MITRE ATT&CK: T1114.003 (Email Collection: Email Forwarding Rule)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Email Events, Office 365 Audit Logs, Google Workspace Admin Logs
+ */
+
+// =============================================================================
+// Scenario 1: Inbox rule creation with forwarding/redirect actions
+// =============================================================================
+rule forwarding_rule_inbox_creation {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects creation of mailbox inbox rules that forward or redirect email to external addresses. Attackers create forwarding rules to maintain persistent access to email communications after initial compromise."
+    severity = "High"
+    mitre_attack = "T1114.003"
+
+  events:
+    // Office 365 / Google Workspace audit log — inbox rule creation
+    $rule.metadata.event_type = "EMAIL_UNCATEGORIZED"
+    $rule.principal.user.userid = $user
+
+    // Audit actions for rule creation
+    (re.regex($rule.metadata.product_event_type, `(?i)(New-InboxRule|Set-InboxRule|UpdateInboxRules|AddMailboxRule)`) or
+     re.regex($rule.security_result.description, `(?i)(ForwardTo|RedirectTo|forward|redirect)`))
+
+  match:
+    $user over 1h
+
+  condition:
+    #rule > 0
+
+  outcome:
+    $risk_score = 85
+    $rule_actions = array_distinct($rule.security_result.description)
+    $affected_users = array_distinct($rule.principal.user.userid)
+    $source_ips = array_distinct($rule.principal.ip)
+}
+
+// =============================================================================
+// Scenario 2: PowerShell or CLI creation of forwarding rules
+// =============================================================================
+rule forwarding_rule_powershell_creation {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects PowerShell or command-line creation of Exchange mail forwarding rules. Attackers use New-InboxRule, Set-Mailbox -ForwardingSmtpAddress, or Set-TransportRule to exfiltrate email."
+    severity = "Critical"
+    mitre_attack = "T1114.003"
+
+  events:
+    $cmd.metadata.event_type = "PROCESS_LAUNCH"
+    $cmd.principal.hostname = $host
+    $cmd.principal.user.userid = $user
+
+    // PowerShell creating or modifying inbox/transport rules
+    (re.regex($cmd.target.process.command_line, `(?i)New-InboxRule.*ForwardTo`) or
+     re.regex($cmd.target.process.command_line, `(?i)Set-Mailbox.*-ForwardingSmtpAddress`) or
+     re.regex($cmd.target.process.command_line, `(?i)Set-Mailbox.*-ForwardingAddress`) or
+     re.regex($cmd.target.process.command_line, `(?i)Set-TransportRule.*RedirectMessageTo`) or
+     re.regex($cmd.target.process.command_line, `(?i)New-TransportRule.*RedirectMessageTo`))
+
+  match:
+    $host over 1h
+
+  condition:
+    #cmd > 0
+
+  outcome:
+    $risk_score = 95
+    $commands_executed = array_distinct($cmd.target.process.command_line)
+    $users = array_distinct($cmd.principal.user.userid)
+}
+
+// =============================================================================
+// Scenario 3: Forwarding to external (non-corporate) domains
+// =============================================================================
+rule forwarding_rule_external_domain {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects mailbox rules configured to forward to external (non-corporate) domains. Cross-references rule target addresses against known corporate domains."
+    severity = "High"
+    mitre_attack = "T1114.003"
+
+  events:
+    $fwd.metadata.event_type = "EMAIL_UNCATEGORIZED"
+    $fwd.principal.user.userid = $user
+
+    // Rule modification or creation event
+    re.regex($fwd.metadata.product_event_type, `(?i)(New-InboxRule|Set-InboxRule|UpdateInboxRules)`)
+
+    // Forward target is NOT a corporate domain — customize this regex
+    re.regex($fwd.security_result.description, `(?i)(ForwardTo|RedirectTo)`)
+    not re.regex($fwd.security_result.description, `(?i)(@corp\.example\.com|@example\.com)`)
+
+  match:
+    $user over 24h
+
+  condition:
+    #fwd > 0
+
+  outcome:
+    $risk_score = 90
+    $forward_targets = array_distinct($fwd.security_result.description)
+    $users = array_distinct($fwd.principal.user.userid)
+}
+
+// =============================================================================
+// Scenario 4: Bulk forwarding rule modification across multiple mailboxes
+// =============================================================================
+rule forwarding_rule_bulk_modification {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects a single user or admin modifying forwarding rules on multiple mailboxes in a short period, suggesting automated compromise or insider threat."
+    severity = "Critical"
+    mitre_attack = "T1114.003"
+
+  events:
+    $bulk.metadata.event_type = "EMAIL_UNCATEGORIZED"
+    $bulk.principal.user.userid = $actor
+    $bulk.target.user.userid = $target_mailbox
+
+    re.regex($bulk.metadata.product_event_type, `(?i)(New-InboxRule|Set-InboxRule|Set-Mailbox)`)
+    re.regex($bulk.security_result.description, `(?i)(ForwardTo|RedirectTo|ForwardingSmtpAddress)`)
+
+  match:
+    $actor over 1h
+
+  condition:
+    count_distinct($bulk.target.user.userid) >= 3
+
+  outcome:
+    $risk_score = 95
+    $mailboxes_modified = count_distinct($bulk.target.user.userid)
+    $target_users = array_distinct($bulk.target.user.userid)
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Replace @corp.example.com / @example.com with your actual corporate domains
+ * - Exclude known admin accounts that legitimately manage transport rules
+ * - Integrate with Azure AD / Google Workspace admin audit logs for best coverage
+ * - Add delegation/impersonation context to identify admin-vs-user actions
+ * - Set up reference lists for approved external forwarding destinations (e.g., legal, auditors)
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - Users forwarding to personal email during approved transitions
+ * - IT admins configuring shared mailbox forwarding
+ * - Migration tools creating temporary forwarding rules
+ * - Auto-forwarding configured by HR for departing employees
+ * - Compliance/legal forwarding to archival services
+ */

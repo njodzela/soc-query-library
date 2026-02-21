@@ -1,0 +1,85 @@
+-- ============================================================
+-- Title: Impossible Travel Detection
+-- Description: Detects user logins from geographically distant locations
+--              within timeframes that make physical travel impossible.
+-- MITRE ATT&CK: T1078 (Valid Accounts), T1078.004 (Cloud Accounts)
+-- Severity: High
+-- Data Sources: Authentication Events, VPN Logs, O365 Sign-in Logs
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Logins from different countries within 1 hour ===
+-- Detects successive logins from different geographic locations
+SELECT
+    e1.username,
+    e1.sourceip AS first_ip,
+    GEOIP(e1.sourceip, 'country') AS first_country,
+    GEOIP(e1.sourceip, 'city') AS first_city,
+    e1.starttime AS first_login,
+    e2.sourceip AS second_ip,
+    GEOIP(e2.sourceip, 'country') AS second_country,
+    GEOIP(e2.sourceip, 'city') AS second_city,
+    e2.starttime AS second_login,
+    (e2.starttime - e1.starttime) / 60000 AS time_diff_minutes
+FROM events AS e1
+INNER JOIN events AS e2 ON e1.username = e2.username
+WHERE e1."EventID" = '4624'
+    AND e2."EventID" = '4624'
+    AND e2.starttime > e1.starttime
+    AND (e2.starttime - e1.starttime) < 3600000  -- within 1 hour
+    AND GEOIP(e1.sourceip, 'country') != GEOIP(e2.sourceip, 'country')
+    AND e1.sourceip != e2.sourceip
+ORDER BY time_diff_minutes ASC
+LAST 24 HOURS
+
+-- === Scenario 2: VPN logins from different countries in short window ===
+-- Monitors VPN authentication for geographic impossibilities
+SELECT
+    username,
+    sourceip,
+    GEOIP(sourceip, 'country') AS country,
+    GEOIP(sourceip, 'city') AS city,
+    starttime AS login_time,
+    LOGSOURCENAME(logsourceid) AS log_source
+FROM events
+WHERE category = 'Authentication'
+    AND LOGSOURCETYPENAME(logsourceid) ILIKE '%VPN%'
+    AND "EventID" IN ('AuthSuccess', 'VPN-Login')
+ORDER BY username, login_time
+LAST 24 HOURS
+-- Post-process: Group by user, compare successive entries for country mismatch
+
+-- === Scenario 3: Cloud authentication with country change ===
+-- Detects O365/Azure AD sign-ins from different countries
+SELECT
+    username,
+    sourceip,
+    GEOIP(sourceip, 'country') AS country,
+    GEOIP(sourceip, 'city') AS city,
+    starttime AS login_time,
+    COUNT(*) AS login_count
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Office 365%'
+    AND UTF8(payload) ILIKE '%UserLoggedIn%'
+GROUP BY username, sourceip, starttime
+HAVING COUNT(*) >= 1
+ORDER BY username, login_time
+LAST 24 HOURS
+-- Post-process: Compare successive entries per user, flag country changes <60 min apart
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Use reference sets for known VPN/proxy egress IPs to exclude
+-- - Adjust time threshold (1 hour) based on organization needs
+-- - Add geographic distance calculation in post-processing
+-- - Exclude known multi-region users (traveling executives)
+-- - Enrich with ASN data for better proxy detection
+--
+-- FALSE POSITIVES:
+-- - VPN split-tunneling with distributed egress points
+-- - Cloud proxy services (Zscaler, Netskope)
+-- - Mobile users on cellular with poor geolocation
+-- - IP geolocation database inaccuracies
+-- - Shared/service accounts used across locations
+-- ============================================================

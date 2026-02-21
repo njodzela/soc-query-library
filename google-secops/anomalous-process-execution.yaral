@@ -1,0 +1,219 @@
+/*
+ * Title:        Anomalous Process Execution
+ * Description:  Detects unusual process execution patterns including suspicious
+ *               parent-child relationships, temp directory execution, LOLBin abuse,
+ *               and renamed system binaries.
+ * MITRE ATT&CK: T1059 (Command and Scripting Interpreter), T1055 (Process Injection),
+ *               T1036 (Masquerading), T1218 (System Binary Proxy Execution),
+ *               T1204 (User Execution)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Process Events, EDR Telemetry, Sysmon, Windows Security Logs
+ */
+
+// =============================================================================
+// Scenario 1: Unusual parent-child process relationships
+// =============================================================================
+rule anomalous_process_unusual_parent_child {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects unusual parent-child process relationships that deviate from normal Windows process hierarchy. Examples: explorer.exe spawning cmd→powershell is normal; winword.exe spawning certutil.exe is not."
+    severity = "High"
+    mitre_attack = "T1059"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+    $proc.principal.user.userid = $user
+
+    // Suspicious parent-child combos
+    // Office apps spawning scripting engines
+    (re.regex($proc.principal.process.file.full_path, `(?i)(WINWORD|EXCEL|POWERPNT|OUTLOOK|ONENOTE)\.EXE$`) and
+     re.regex($proc.target.process.file.full_path, `(?i)(cmd\.exe|powershell\.exe|pwsh\.exe|wscript\.exe|cscript\.exe|mshta\.exe|certutil\.exe|bitsadmin\.exe|regsvr32\.exe)$`))
+
+    or
+
+    // Services spawning unexpected interpreters
+    (re.regex($proc.principal.process.file.full_path, `(?i)(w3wp\.exe|sqlservr\.exe|httpd\.exe|tomcat)`) and
+     re.regex($proc.target.process.file.full_path, `(?i)(cmd\.exe|powershell\.exe|whoami\.exe|net\.exe|net1\.exe)$`))
+
+    or
+
+    // WMI provider host spawning shells
+    (re.regex($proc.principal.process.file.full_path, `(?i)WmiPrvSE\.exe$`) and
+     re.regex($proc.target.process.file.full_path, `(?i)(cmd\.exe|powershell\.exe|pwsh\.exe)$`))
+
+  match:
+    $host over 1h
+
+  condition:
+    #proc > 0
+
+  outcome:
+    $risk_score = 85
+    $parent_processes = array_distinct($proc.principal.process.file.full_path)
+    $child_processes = array_distinct($proc.target.process.file.full_path)
+    $command_lines = array_distinct($proc.target.process.command_line)
+    $users = array_distinct($proc.principal.user.userid)
+}
+
+// =============================================================================
+// Scenario 2: Execution from temp/staging directories
+// =============================================================================
+rule anomalous_process_temp_directory_execution {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects execution of binaries from temporary directories, user profile paths, or other non-standard locations commonly used by malware for staging."
+    severity = "High"
+    mitre_attack = "T1204"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+    $proc.target.process.file.full_path = $exe_path
+
+    // Execution from suspicious paths
+    (re.regex($proc.target.process.file.full_path, `(?i)(\\Temp\\|\\tmp\\|\\AppData\\Local\\Temp\\)`) or
+     re.regex($proc.target.process.file.full_path, `(?i)(\\Downloads\\|\\Desktop\\|\\Documents\\).*\.(exe|dll|scr|bat|cmd|ps1|vbs)$`) or
+     re.regex($proc.target.process.file.full_path, `(?i)(\\ProgramData\\[^\\]+\\[^\\]+\.(exe|dll))`) or
+     re.regex($proc.target.process.file.full_path, `(?i)(\\Users\\Public\\).*\.(exe|dll|scr)`))
+
+    // Exclude known legitimate temp-executing software
+    not re.regex($proc.target.process.file.full_path, `(?i)(\\Temp\\.*\\(DismHost|TiWorker|setup|installer))`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #proc > 0
+
+  outcome:
+    $risk_score = 75
+    $execution_paths = array_distinct($proc.target.process.file.full_path)
+    $command_lines = array_distinct($proc.target.process.command_line)
+    $users = array_distinct($proc.principal.user.userid)
+}
+
+// =============================================================================
+// Scenario 3: Living-off-the-Land Binary (LOLBin) abuse
+// =============================================================================
+rule anomalous_process_lolbin_abuse {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects abuse of Living-off-the-Land Binaries (LOLBins) — legitimate Windows binaries used for malicious purposes such as downloading payloads, executing code, or bypassing application controls."
+    severity = "High"
+    mitre_attack = "T1218"
+
+  events:
+    $lol.metadata.event_type = "PROCESS_LAUNCH"
+    $lol.principal.hostname = $host
+
+    // LOLBin executions with suspicious command-line arguments
+    (// certutil downloading files
+     (re.regex($lol.target.process.file.full_path, `(?i)certutil\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(-urlcache|-split|http|ftp)`))
+
+     or
+
+     // mshta executing remote content
+     (re.regex($lol.target.process.file.full_path, `(?i)mshta\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(http|javascript|vbscript)`))
+
+     or
+
+     // regsvr32 executing remote scriptlets
+     (re.regex($lol.target.process.file.full_path, `(?i)regsvr32\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(/s\s+/n\s+/u.*scrobj|http)`))
+
+     or
+
+     // rundll32 executing JavaScript or unusual DLLs
+     (re.regex($lol.target.process.file.full_path, `(?i)rundll32\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(javascript|mshtml|\\Temp\\|\\Downloads\\|http)`))
+
+     or
+
+     // bitsadmin downloading files
+     (re.regex($lol.target.process.file.full_path, `(?i)bitsadmin\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(/transfer.*http|/addfile)`))
+
+     or
+
+     // wmic process create or remote execution
+     (re.regex($lol.target.process.file.full_path, `(?i)wmic\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(process\s+call\s+create|/node:)`)))
+
+  match:
+    $host over 1h
+
+  condition:
+    #lol > 0
+
+  outcome:
+    $risk_score = 85
+    $lolbins_used = array_distinct($lol.target.process.file.full_path)
+    $commands = array_distinct($lol.target.process.command_line)
+    $users = array_distinct($lol.principal.user.userid)
+}
+
+// =============================================================================
+// Scenario 4: Renamed system binary execution (masquerading)
+// =============================================================================
+rule anomalous_process_renamed_binary {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects execution of renamed system binaries — where the internal PE name does not match the file name on disk. Attackers rename malicious tools or copy system binaries to evade detection."
+    severity = "High"
+    mitre_attack = "T1036"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+
+    // PE metadata original filename does NOT match actual filename
+    $proc.target.process.file.pe_file.original_file_name = $original_name
+    $proc.target.process.file.full_path = $actual_path
+
+    // Original name is a known system binary
+    re.regex($proc.target.process.file.pe_file.original_file_name, `(?i)(cmd\.exe|powershell\.exe|pwsh\.exe|net\.exe|whoami\.exe|tasklist\.exe|schtasks\.exe|reg\.exe)`)
+
+    // But actual filename is different
+    not re.regex($proc.target.process.file.full_path, `(?i)\\(cmd|powershell|pwsh|net|whoami|tasklist|schtasks|reg)\.exe$`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #proc > 0
+
+  outcome:
+    $risk_score = 90
+    $original_names = array_distinct($proc.target.process.file.pe_file.original_file_name)
+    $actual_paths = array_distinct($proc.target.process.file.full_path)
+    $command_lines = array_distinct($proc.target.process.command_line)
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Add org-specific legitimate temp-directory executables to exclusions (e.g., auto-updaters)
+ * - Expand LOLBin list from LOLBAS project (https://lolbas-project.github.io)
+ * - For parent-child rules, add legitimate automation tools that spawn cmd/powershell
+ * - Consider adding process hash comparison against known-good baselines
+ * - Tune renamed binary detection: some installers legitimately rename system utilities
+ * - Add application whitelisting context for higher-fidelity detections
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - Software installers extracting and executing from %TEMP%
+ * - Auto-update mechanisms (Chrome, Firefox, Zoom) running from AppData
+ * - IT automation tools (Ansible, Chef, Puppet) spawning cmd/powershell from services
+ * - Developers running scripts from project directories on Desktop/Documents
+ * - Legitimate use of certutil for certificate management (without -urlcache)
+ * - SCCM/Intune deploying packages via bitsadmin
+ * - Virtualization guest tools using renamed binaries
+ */

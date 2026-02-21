@@ -1,0 +1,2049 @@
+/*
+ * ============================================================================
+ *       SNON HuB — SOC Detection Query Library (Google SecOps / Chronicle)
+ *       Complete Working Document — All YARA-L 2.0 Detection Rules
+ *       Author: Christian M. Njodzela
+ *       Date: 2026-02-21
+ *       Platform: Google SecOps (Chronicle SIEM) — UDM Schema
+ * ============================================================================
+ *
+ *  TABLE OF CONTENTS
+ *  -----------------
+ *  SECTION 1:  Brute-Force Detection .......................... Line ~30
+ *  SECTION 2:  Command and Control ............................ Line ~170
+ *  SECTION 3:  Credential Access .............................. Line ~310
+ *  SECTION 4:  Data Exfiltration .............................. Line ~470
+ *  SECTION 5:  Defense Evasion ................................ Line ~620
+ *  SECTION 6:  Lateral Movement ............................... Line ~780
+ *  SECTION 7:  Persistence Mechanisms ......................... Line ~920
+ *  SECTION 8:  Phishing Indicators ............................ Line ~1060
+ *  SECTION 9:  Privilege Escalation ........................... Line ~1210
+ *  SECTION 10: Reconnaissance ................................. Line ~1350
+ *  SECTION 11: Forwarding Rule Abuse [NEW] .................... Line ~1500
+ *  SECTION 12: Impossible Travel [NEW] ........................ Line ~1680
+ *  SECTION 13: Spam Bot Detection [NEW] ....................... Line ~1850
+ *  SECTION 14: Email Spoofing [NEW] ........................... Line ~2020
+ *  SECTION 15: Anomalous Process Execution [NEW] .............. Line ~2200
+ *  SECTION 16: Routine Threat Hunting [NEW] ................... Line ~2420
+ *
+ * ============================================================================
+ */
+
+
+// ############################################################################
+// SECTION 1: BRUTE-FORCE DETECTION
+// MITRE ATT&CK: T1110.001, T1110.003, T1110.004
+// ############################################################################
+
+rule brute_force_single_source {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects excessive failed login attempts from a single IP address within a short window."
+    severity = "High"
+    mitre_attack = "T1110.001"
+
+  events:
+    $fail.metadata.event_type = "USER_LOGIN"
+    $fail.security_result.action = "BLOCK"
+    $fail.security_result.category = "AUTH_VIOLATION"
+    $fail.principal.ip = $source_ip
+    $fail.target.user.userid = $target_user
+
+  match:
+    $source_ip over 10m
+
+  condition:
+    #fail > 15
+
+  outcome:
+    $risk_score = 75
+    $event_count = #fail
+    $target_users = array_distinct($fail.target.user.userid)
+}
+
+rule password_spraying_detection {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects password spraying: failed logins to many distinct accounts from one source."
+    severity = "High"
+    mitre_attack = "T1110.003"
+
+  events:
+    $fail.metadata.event_type = "USER_LOGIN"
+    $fail.security_result.action = "BLOCK"
+    $fail.principal.ip = $source_ip
+    $fail.target.user.userid = $target_user
+
+  match:
+    $source_ip over 30m
+
+  condition:
+    #fail > 10 and count_distinct($fail.target.user.userid) > 8
+
+  outcome:
+    $risk_score = 85
+    $unique_targets = count_distinct($fail.target.user.userid)
+    $event_count = #fail
+}
+
+rule credential_stuffing_success {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects successful login preceded by multiple failures, indicating credential stuffing."
+    severity = "Critical"
+    mitre_attack = "T1110.004"
+
+  events:
+    $fail.metadata.event_type = "USER_LOGIN"
+    $fail.security_result.action = "BLOCK"
+    $fail.principal.ip = $source_ip
+    $success.metadata.event_type = "USER_LOGIN"
+    $success.security_result.action = "ALLOW"
+    $success.principal.ip = $source_ip
+    $fail.metadata.event_timestamp.seconds < $success.metadata.event_timestamp.seconds
+
+  match:
+    $source_ip over 30m
+
+  condition:
+    #fail > 10 and #success > 0
+
+  outcome:
+    $risk_score = 90
+    $failed_count = #fail
+    $successful_users = array_distinct($success.target.user.userid)
+}
+
+/*
+ * TUNING: Adjust >15 threshold based on org baseline. Exclude known scanner IPs,
+ * VPN egress, load balancers. Filter cloud IdPs by application ID.
+ * FALSE POSITIVES: Automated monitoring tools, shared NAT/VPN IPs, password
+ * reset flows, expired service account credentials, load balancer masking.
+ */
+
+
+// ############################################################################
+// SECTION 2: COMMAND AND CONTROL DETECTION
+// MITRE ATT&CK: T1071.001, T1071.004, T1573, T1105
+// ############################################################################
+
+rule c2_http_beaconing {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects regular-interval HTTP/S connections suggesting C2 beaconing."
+    severity = "High"
+    mitre_attack = "T1071.001"
+
+  events:
+    $beacon.metadata.event_type = "NETWORK_HTTP"
+    $beacon.principal.ip = $src_ip
+    $beacon.target.hostname = $domain
+    ($beacon.target.port = 80 or $beacon.target.port = 443)
+    net.ip_in_range_cidr($beacon.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($beacon.principal.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($beacon.principal.ip, "192.168.0.0/16")
+
+  match:
+    $src_ip, $domain over 1h
+
+  condition:
+    #beacon > 60
+
+  outcome:
+    $risk_score = 75
+    $connection_count = #beacon
+    $target_domain = array_distinct($beacon.target.hostname)
+}
+
+rule c2_dns_channel {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects DNS-based C2 via excessive TXT queries to a single parent domain."
+    severity = "High"
+    mitre_attack = "T1071.004"
+
+  events:
+    $dns.metadata.event_type = "NETWORK_DNS"
+    $dns.principal.ip = $src_ip
+    $dns.network.dns.questions.name = $query
+    $dns.network.dns.questions.type = "TXT"
+
+  match:
+    $src_ip over 30m
+
+  condition:
+    #dns > 50
+
+  outcome:
+    $risk_score = 80
+    $query_count = #dns
+    $queried_domains = array_distinct($dns.network.dns.questions.name)
+}
+
+rule c2_encrypted_nonstandard_port {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects TLS/SSL traffic on non-standard ports, often used by C2 frameworks."
+    severity = "High"
+    mitre_attack = "T1573"
+
+  events:
+    $conn.metadata.event_type = "NETWORK_CONNECTION"
+    $conn.principal.ip = $src_ip
+    $conn.target.ip = $dst_ip
+    $conn.target.port = $port
+    $conn.network.application_protocol = "TLS"
+    $conn.target.port != 443
+    $conn.target.port != 8443
+    $conn.target.port != 993
+    $conn.target.port != 995
+    $conn.target.port != 636
+    not net.ip_in_range_cidr($conn.target.ip, "10.0.0.0/8")
+    not net.ip_in_range_cidr($conn.target.ip, "172.16.0.0/12")
+    not net.ip_in_range_cidr($conn.target.ip, "192.168.0.0/16")
+
+  match:
+    $src_ip over 1h
+
+  condition:
+    #conn > 5
+
+  outcome:
+    $risk_score = 80
+    $destinations = array_distinct($conn.target.ip)
+    $ports_used = array_distinct($conn.target.port)
+    $connection_count = #conn
+}
+
+/*
+ * TUNING: Baseline beacon-like SaaS traffic (Slack, Teams). Exclude known CDN/update domains.
+ * Add JA3/JA3S fingerprint matching. Build TLS non-standard port allow-list for VPNs/apps.
+ * FALSE POSITIVES: Software update agents, monitoring heartbeats, VPN/SD-WAN solutions,
+ * CDN resolution generating many TXT queries.
+ */
+
+
+// ############################################################################
+// SECTION 3: CREDENTIAL ACCESS DETECTION
+// MITRE ATT&CK: T1003.001, T1558.003, T1555, T1552
+// ############################################################################
+
+rule credential_lsass_access {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects suspicious access to LSASS process memory, indicating credential dumping."
+    severity = "Critical"
+    mitre_attack = "T1003.001"
+
+  events:
+    $access.metadata.event_type = "PROCESS_OPEN"
+    $access.principal.hostname = $host
+    $access.principal.user.userid = $user
+    re.regex($access.target.process.file.full_path, `(?i)\\lsass\.exe$`)
+    not re.regex($access.principal.process.file.full_path, `(?i)(\\csrss\.exe|\\wininit\.exe|\\svchost\.exe|\\MsMpEng\.exe|\\lsm\.exe)$`)
+
+  match:
+    $host over 5m
+
+  condition:
+    #access > 0
+
+  outcome:
+    $risk_score = 95
+    $accessing_processes = array_distinct($access.principal.process.file.full_path)
+    $users = array_distinct($access.principal.user.userid)
+}
+
+rule credential_kerberoasting {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects Kerberoasting by identifying excessive TGS ticket requests with RC4 encryption."
+    severity = "High"
+    mitre_attack = "T1558.003"
+
+  events:
+    $tgs.metadata.event_type = "USER_RESOURCE_ACCESS"
+    $tgs.metadata.product_event_type = "4769"
+    $tgs.principal.user.userid = $user
+    $tgs.security_result.description = "0x17"
+    not re.regex($tgs.principal.user.userid, `\$$`)
+
+  match:
+    $user over 30m
+
+  condition:
+    #tgs > 10
+
+  outcome:
+    $risk_score = 85
+    $ticket_count = #tgs
+    $services_targeted = array_distinct($tgs.target.resource.name)
+}
+
+rule credential_file_access {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects access to known credential storage files (browser DBs, KeePass, SAM, etc.)."
+    severity = "High"
+    mitre_attack = "T1555"
+
+  events:
+    $file.metadata.event_type = "FILE_READ"
+    $file.principal.hostname = $host
+    $file.principal.user.userid = $user
+    re.regex($file.target.file.full_path, `(?i)(\\Login Data|\\Cookies|\\Web Data|\.kdbx|\\SAM|\\SYSTEM|\\NTDS\.dit|\\credentials\.xml|\.rdg|\\ntuser\.dat)`)
+    not re.regex($file.principal.process.file.full_path, `(?i)(\\chrome\.exe|\\msedge\.exe|\\firefox\.exe|\\svchost\.exe)$`)
+
+  match:
+    $host over 30m
+
+  condition:
+    #file > 0
+
+  outcome:
+    $risk_score = 85
+    $files_accessed = array_distinct($file.target.file.full_path)
+    $accessing_processes = array_distinct($file.principal.process.file.full_path)
+    $users = array_distinct($file.principal.user.userid)
+}
+
+/*
+ * TUNING: Add EDR/AV process paths to LSASS exclusions. Tune Kerberoasting TGS threshold (>10).
+ * Customize credential file paths for org-specific stores.
+ * FALSE POSITIVES: AV scanning LSASS, Credential Guard, Process Explorer, backup software,
+ * browser self-accessing their own DBs, application service accounts requesting Kerberos tickets.
+ */
+
+
+// ############################################################################
+// SECTION 4: DATA EXFILTRATION DETECTION
+// MITRE ATT&CK: T1048.001, T1048.002, T1567, T1041
+// ############################################################################
+
+rule exfiltration_large_outbound {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects unusually large outbound data transfers to external destinations."
+    severity = "Critical"
+    mitre_attack = "T1048.001"
+
+  events:
+    $transfer.metadata.event_type = "NETWORK_CONNECTION"
+    $transfer.principal.ip = $src_ip
+    $transfer.target.ip = $dst_ip
+    net.ip_in_range_cidr($transfer.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($transfer.principal.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($transfer.principal.ip, "192.168.0.0/16")
+    not net.ip_in_range_cidr($transfer.target.ip, "10.0.0.0/8")
+    not net.ip_in_range_cidr($transfer.target.ip, "172.16.0.0/12")
+    not net.ip_in_range_cidr($transfer.target.ip, "192.168.0.0/16")
+    $transfer.network.sent_bytes > 0
+
+  match:
+    $src_ip over 1h
+
+  condition:
+    sum($transfer.network.sent_bytes) > 524288000
+
+  outcome:
+    $risk_score = 90
+    $total_bytes_sent = sum($transfer.network.sent_bytes)
+    $destinations = array_distinct($transfer.target.ip)
+}
+
+rule exfiltration_dns_tunneling {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects DNS tunneling by identifying high-entropy, long subdomain queries."
+    severity = "High"
+    mitre_attack = "T1048.001"
+
+  events:
+    $dns.metadata.event_type = "NETWORK_DNS"
+    $dns.network.dns.questions.name = $query_domain
+    $dns.principal.ip = $src_ip
+    strings.length($dns.network.dns.questions.name) > 50
+    ($dns.network.dns.questions.type = "TXT" or
+     $dns.network.dns.questions.type = "NULL" or
+     $dns.network.dns.questions.type = "CNAME")
+
+  match:
+    $src_ip over 30m
+
+  condition:
+    #dns > 100
+
+  outcome:
+    $risk_score = 85
+    $query_count = #dns
+    $sample_domains = array_distinct($dns.network.dns.questions.name)
+}
+
+rule exfiltration_cloud_upload {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects uploads to personal cloud storage services (Dropbox, Drive, OneDrive, Mega)."
+    severity = "High"
+    mitre_attack = "T1567"
+
+  events:
+    $upload.metadata.event_type = "NETWORK_HTTP"
+    $upload.principal.ip = $src_ip
+    re.regex($upload.target.hostname, `(?i)(dropbox\.com|drive\.google\.com|onedrive\.live\.com|mega\.nz|wetransfer\.com|sendspace\.com)`)
+    ($upload.network.http.method = "POST" or $upload.network.http.method = "PUT")
+    $upload.network.sent_bytes > 1048576
+
+  match:
+    $src_ip over 1h
+
+  condition:
+    #upload > 3
+
+  outcome:
+    $risk_score = 80
+    $upload_count = #upload
+    $total_bytes = sum($upload.network.sent_bytes)
+    $services = array_distinct($upload.target.hostname)
+}
+
+/*
+ * TUNING: Adjust 500MB threshold for large orgs. Exclude backup/CDN servers.
+ * Tune DNS query length (>50) — some CDNs use long subdomains. Allow-list sanctioned cloud storage.
+ * FALSE POSITIVES: Legitimate backups, video conferencing bandwidth, software updates,
+ * DNS-based load balancing, sanctioned cloud storage for business.
+ */
+
+
+// ############################################################################
+// SECTION 5: DEFENSE EVASION DETECTION
+// MITRE ATT&CK: T1070.001, T1562.001, T1036.005, T1027
+// ############################################################################
+
+rule evasion_log_clearing {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects clearing of Windows event logs via wevtutil or PowerShell."
+    severity = "Critical"
+    mitre_attack = "T1070.001"
+
+  events:
+    $clear.metadata.event_type = "PROCESS_LAUNCH"
+    $clear.principal.hostname = $host
+    $clear.principal.user.userid = $user
+    (re.regex($clear.target.process.command_line, `(?i)wevtutil\s+(cl|clear-log)`) or
+     re.regex($clear.target.process.command_line, `(?i)Clear-EventLog`) or
+     re.regex($clear.target.process.command_line, `(?i)Remove-EventLog`))
+
+  match:
+    $host over 1h
+
+  condition:
+    #clear > 0
+
+  outcome:
+    $risk_score = 90
+    $commands = array_distinct($clear.target.process.command_line)
+    $users = array_distinct($clear.principal.user.userid)
+}
+
+rule evasion_disable_security_tools {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects attempts to stop or disable security tools and services."
+    severity = "Critical"
+    mitre_attack = "T1562.001"
+
+  events:
+    $tamper.metadata.event_type = "PROCESS_LAUNCH"
+    $tamper.principal.hostname = $host
+    (re.regex($tamper.target.process.command_line, `(?i)(net\s+stop|sc\s+stop|sc\s+config\s+.*start=\s*disabled)`) and
+     re.regex($tamper.target.process.command_line, `(?i)(WinDefend|MpsSvc|wscsvc|Sense|SepMasterService|ccSvcHst|McAfee|avp|bdagent|SAVService)`))
+    or
+    re.regex($tamper.target.process.command_line, `(?i)Set-MpPreference\s+.*-Disable`)
+    or
+    re.regex($tamper.target.process.command_line, `(?i)fltMC\.exe\s+(unload|detach)\s+SysmonDrv`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #tamper > 0
+
+  outcome:
+    $risk_score = 95
+    $commands = array_distinct($tamper.target.process.command_line)
+    $users = array_distinct($tamper.principal.user.userid)
+}
+
+rule evasion_masquerading {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects executables masquerading as legitimate Windows binaries running from incorrect paths."
+    severity = "High"
+    mitre_attack = "T1036.005"
+
+  events:
+    $masq.metadata.event_type = "PROCESS_LAUNCH"
+    $masq.principal.hostname = $host
+    re.regex($masq.target.process.file.full_path, `(?i)(svchost\.exe|csrss\.exe|lsass\.exe|services\.exe|smss\.exe|wininit\.exe|winlogon\.exe)$`)
+    not re.regex($masq.target.process.file.full_path, `(?i)(\\Windows\\System32\\|\\Windows\\SysWOW64\\)`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #masq > 0
+
+  outcome:
+    $risk_score = 90
+    $suspicious_paths = array_distinct($masq.target.process.file.full_path)
+    $parent_processes = array_distinct($masq.principal.process.file.full_path)
+}
+
+/*
+ * TUNING: Account for admin log clearing during maintenance. Add org security tool names
+ * to tampering regex. Expand masquerading path exclusions for non-standard installs.
+ * FALSE POSITIVES: Scheduled maintenance log rotation, EDR service restarts for updates,
+ * software installers stopping services, virtualization helper binaries.
+ */
+
+
+// ############################################################################
+// SECTION 6: LATERAL MOVEMENT DETECTION
+// MITRE ATT&CK: T1021.001, T1021.002, T1021.006, T1570
+// ############################################################################
+
+rule lateral_movement_rdp_internal {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects RDP connections between internal workstations."
+    severity = "High"
+    mitre_attack = "T1021.001"
+
+  events:
+    $rdp.metadata.event_type = "NETWORK_CONNECTION"
+    $rdp.target.port = 3389
+    $rdp.principal.ip = $src_ip
+    net.ip_in_range_cidr($rdp.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($rdp.principal.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($rdp.principal.ip, "192.168.0.0/16")
+    $rdp.target.ip = $dst_ip
+    net.ip_in_range_cidr($rdp.target.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($rdp.target.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($rdp.target.ip, "192.168.0.0/16")
+
+  match:
+    $src_ip over 1h
+
+  condition:
+    count_distinct($rdp.target.ip) >= 3
+
+  outcome:
+    $risk_score = 80
+    $destination_hosts = array_distinct($rdp.target.ip)
+    $unique_targets = count_distinct($rdp.target.ip)
+}
+
+rule lateral_movement_smb_sweep {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects a single host accessing SMB admin shares on multiple internal systems."
+    severity = "High"
+    mitre_attack = "T1021.002"
+
+  events:
+    $smb.metadata.event_type = "NETWORK_CONNECTION"
+    $smb.target.port = 445
+    $smb.principal.ip = $src_ip
+    $smb.target.ip = $dst_ip
+    re.regex($smb.target.resource.name, `(?i)(ADMIN\$|C\$|IPC\$)`)
+
+  match:
+    $src_ip over 30m
+
+  condition:
+    count_distinct($smb.target.ip) >= 5
+
+  outcome:
+    $risk_score = 85
+    $targets_accessed = count_distinct($smb.target.ip)
+    $resources = array_distinct($smb.target.resource.name)
+}
+
+rule lateral_movement_winrm {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects WinRM-based lateral movement via remote PowerShell sessions."
+    severity = "High"
+    mitre_attack = "T1021.006"
+
+  events:
+    $winrm.metadata.event_type = "NETWORK_CONNECTION"
+    ($winrm.target.port = 5985 or $winrm.target.port = 5986)
+    $winrm.principal.ip = $src_ip
+    $winrm.target.ip = $dst_ip
+    net.ip_in_range_cidr($winrm.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($winrm.principal.ip, "172.16.0.0/12")
+
+  match:
+    $src_ip over 1h
+
+  condition:
+    count_distinct($winrm.target.ip) >= 3
+
+  outcome:
+    $risk_score = 80
+    $target_hosts = array_distinct($winrm.target.ip)
+}
+
+/*
+ * TUNING: Exclude jump servers/bastion hosts. Exclude DCs and file servers from SMB rules.
+ * Add user context for compromised account identification. Time-of-day filtering enhances signal.
+ * FALSE POSITIVES: IT admin RDP, vulnerability scanners, SCCM/MECM deployments,
+ * monitoring tools (SolarWinds, PRTG), GPO-triggered SMB connections.
+ */
+
+
+// ############################################################################
+// SECTION 7: PERSISTENCE MECHANISMS DETECTION
+// MITRE ATT&CK: T1053.005, T1547.001, T1136, T1543.003
+// ############################################################################
+
+rule persistence_scheduled_task {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects scheduled task creation that may indicate persistence."
+    severity = "High"
+    mitre_attack = "T1053.005"
+
+  events:
+    $task.metadata.event_type = "PROCESS_LAUNCH"
+    $task.principal.hostname = $host
+    re.regex($task.target.process.file.full_path, `(?i)schtasks\.exe$`)
+    re.regex($task.target.process.command_line, `(?i)/create`)
+    not re.regex($task.principal.user.userid, `(?i)SYSTEM`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #task > 0
+
+  outcome:
+    $risk_score = 70
+    $commands = array_distinct($task.target.process.command_line)
+    $users = array_distinct($task.principal.user.userid)
+}
+
+rule persistence_registry_run_key {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects modification of registry Run/RunOnce keys for persistence."
+    severity = "High"
+    mitre_attack = "T1547.001"
+
+  events:
+    $reg.metadata.event_type = "REGISTRY_MODIFICATION"
+    $reg.principal.hostname = $host
+    re.regex($reg.target.registry.registry_key, `(?i)(\\CurrentVersion\\Run|\\CurrentVersion\\RunOnce|\\CurrentVersion\\RunServices)`)
+    $reg.principal.user.userid = $user
+
+  match:
+    $host over 1h
+
+  condition:
+    #reg > 0
+
+  outcome:
+    $risk_score = 75
+    $registry_keys = array_distinct($reg.target.registry.registry_key)
+    $registry_values = array_distinct($reg.target.registry.registry_value_data)
+    $users = array_distinct($reg.principal.user.userid)
+}
+
+rule persistence_suspicious_service {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects new Windows service creation with binaries from non-standard paths."
+    severity = "High"
+    mitre_attack = "T1543.003"
+
+  events:
+    $svc.metadata.event_type = "PROCESS_LAUNCH"
+    $svc.principal.hostname = $host
+    re.regex($svc.target.process.file.full_path, `(?i)sc\.exe$`)
+    re.regex($svc.target.process.command_line, `(?i)\bcreate\b`)
+    not re.regex($svc.target.process.command_line, `(?i)(\\Windows\\System32|\\Program Files|\\Program Files \(x86\))`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #svc > 0
+
+  outcome:
+    $risk_score = 80
+    $commands = array_distinct($svc.target.process.command_line)
+    $users = array_distinct($svc.principal.user.userid)
+}
+
+/*
+ * TUNING: Exclude SCCM/PDQ Deploy scheduled tasks. Filter known Run key entries from
+ * endpoint management. Build approved service binary path allow-list.
+ * FALSE POSITIVES: Software installations, Windows Update tasks, GPO-deployed scripts,
+ * AV/EDR service installation, IT management tools.
+ */
+
+
+// ############################################################################
+// SECTION 8: PHISHING INDICATORS DETECTION
+// MITRE ATT&CK: T1566.001, T1566.002, T1598
+// ############################################################################
+
+rule phishing_attachment_execution {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects email delivery of suspicious attachment types followed by process execution."
+    severity = "Critical"
+    mitre_attack = "T1566.001"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.target.user.email_addresses = $recipient
+    re.regex($email.about.file.full_path, `(?i)\.(exe|scr|js|vbs|hta|bat|cmd|ps1|lnk|iso|img)$`)
+    $exec.metadata.event_type = "PROCESS_LAUNCH"
+    $exec.principal.user.email_addresses = $recipient
+    re.regex($exec.target.process.file.full_path, `(?i)(\\Temp\\|\\Downloads\\|\\AppData\\Local\\Temp)`)
+    $email.metadata.event_timestamp.seconds < $exec.metadata.event_timestamp.seconds
+    $exec.metadata.event_timestamp.seconds - $email.metadata.event_timestamp.seconds < 900
+
+  match:
+    $recipient over 30m
+
+  condition:
+    #email > 0 and #exec > 0
+
+  outcome:
+    $risk_score = 95
+    $attachment_names = array_distinct($email.about.file.full_path)
+    $executed_processes = array_distinct($exec.target.process.file.full_path)
+}
+
+rule phishing_new_domain_click {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects user navigation to newly registered domains originating from email links."
+    severity = "High"
+    mitre_attack = "T1566.002"
+
+  events:
+    $click.metadata.event_type = "NETWORK_HTTP"
+    $click.principal.user.userid = $user
+    $click.target.hostname = $domain
+    $click.target.domain.creation_time.seconds > 0
+    timestamp.current_seconds() - $click.target.domain.creation_time.seconds < 2592000
+    re.regex($click.network.http.referral_url, `(?i)(mail\.google\.com|outlook\.office|webmail|zimbra)`)
+
+  match:
+    $user over 1h
+
+  condition:
+    #click > 0
+
+  outcome:
+    $risk_score = 80
+    $domains_visited = array_distinct($click.target.hostname)
+}
+
+rule phishing_credential_harvest {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects POST requests with credential-like parameters to non-corporate domains."
+    severity = "High"
+    mitre_attack = "T1598"
+
+  events:
+    $post.metadata.event_type = "NETWORK_HTTP"
+    $post.network.http.method = "POST"
+    $post.principal.user.userid = $user
+    $post.target.hostname = $domain
+    not re.regex($post.target.hostname, `(?i)(\.corp\.example\.com|\.internal\.example\.com)$`)
+    re.regex($post.network.http.parsed_user_agent, `(?i)(login|signin|auth|verify|account|secure|password)`)
+
+  match:
+    $user over 1h
+
+  condition:
+    #post > 0
+
+  outcome:
+    $risk_score = 85
+    $target_domains = array_distinct($post.target.hostname)
+    $submission_count = #post
+}
+
+/*
+ * TUNING: Customize extension list per email gateway blocks. Adjust domain age (30 days).
+ * Replace example.com with actual corporate domains. Integrate VirusTotal/PhishTank feeds.
+ * FALSE POSITIVES: Legitimate new vendor domains, marketing tracking links, KnowBe4 simulations,
+ * new SaaS onboarding, URL shortener redirects.
+ */
+
+
+// ############################################################################
+// SECTION 9: PRIVILEGE ESCALATION DETECTION
+// MITRE ATT&CK: T1068, T1548.002, T1134, T1078.002
+// ############################################################################
+
+rule privesc_uac_bypass {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects UAC bypass techniques using auto-elevating Windows binaries."
+    severity = "Critical"
+    mitre_attack = "T1548.002"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+    re.regex($proc.principal.process.file.full_path, `(?i)(fodhelper\.exe|eventvwr\.exe|computerdefaults\.exe|sdclt\.exe)`)
+    not re.regex($proc.target.process.file.full_path, `(?i)(mmc\.exe|control\.exe)`)
+
+  match:
+    $host over 5m
+
+  condition:
+    #proc > 0
+
+  outcome:
+    $risk_score = 95
+    $parent_processes = array_distinct($proc.principal.process.file.full_path)
+    $child_processes = array_distinct($proc.target.process.file.full_path)
+}
+
+rule privesc_sensitive_privilege {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects assignment of highly sensitive privileges to non-system accounts."
+    severity = "High"
+    mitre_attack = "T1134"
+
+  events:
+    $priv.metadata.event_type = "USER_RESOURCE_ACCESS"
+    $priv.principal.user.userid = $user
+    $priv.principal.hostname = $host
+    $priv.metadata.product_event_type = "4672"
+    not re.regex($priv.principal.user.userid, `(?i)(SYSTEM|LOCAL SERVICE|NETWORK SERVICE)`)
+
+  match:
+    $user over 1h
+
+  condition:
+    #priv > 0
+
+  outcome:
+    $risk_score = 75
+    $hosts = array_distinct($priv.principal.hostname)
+    $event_count = #priv
+}
+
+rule privesc_admin_group_addition {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects user accounts being added to privileged groups."
+    severity = "Critical"
+    mitre_attack = "T1078.002"
+
+  events:
+    $add.metadata.event_type = "GROUP_MODIFICATION"
+    $add.principal.user.userid = $actor
+    re.regex($add.target.group.group_display_name, `(?i)(Domain Admins|Enterprise Admins|Schema Admins|Administrators|Account Operators|Backup Operators)`)
+    $add.target.user.userid = $added_user
+
+  match:
+    $actor over 1h
+
+  condition:
+    #add > 0
+
+  outcome:
+    $risk_score = 90
+    $groups_modified = array_distinct($add.target.group.group_display_name)
+    $users_added = array_distinct($add.target.user.userid)
+}
+
+/*
+ * TUNING: Expand UAC bypass parent list (check LOLBAS project). Filter 4672 to specific
+ * sensitive privileges. Add org-specific privileged groups. Correlate with change tickets.
+ * FALSE POSITIVES: IT admin authorized escalation, SCIM provisioning, software installers
+ * requesting elevation, domain join operations, service account SeImpersonatePrivilege.
+ */
+
+
+// ############################################################################
+// SECTION 10: RECONNAISSANCE DETECTION
+// MITRE ATT&CK: T1595, T1592, T1589, T1590
+// ############################################################################
+
+rule recon_port_scan {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects port scanning activity from a single source to many ports."
+    severity = "Medium"
+    mitre_attack = "T1595"
+
+  events:
+    $scan.metadata.event_type = "NETWORK_CONNECTION"
+    $scan.principal.ip = $src_ip
+    $scan.target.ip = $dst_ip
+    $scan.target.port = $port
+    $scan.network.sent_bytes < 200
+
+  match:
+    $src_ip over 10m
+
+  condition:
+    count_distinct($scan.target.port) > 50
+
+  outcome:
+    $risk_score = 65
+    $unique_ports = count_distinct($scan.target.port)
+    $targets = array_distinct($scan.target.ip)
+    $connection_count = #scan
+}
+
+rule recon_network_sweep {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects horizontal network sweeps across internal subnets."
+    severity = "Medium"
+    mitre_attack = "T1590"
+
+  events:
+    $sweep.metadata.event_type = "NETWORK_CONNECTION"
+    $sweep.principal.ip = $src_ip
+    $sweep.target.ip = $dst_ip
+    net.ip_in_range_cidr($sweep.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($sweep.principal.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($sweep.principal.ip, "192.168.0.0/16")
+    ($sweep.target.port = 22 or $sweep.target.port = 80 or
+     $sweep.target.port = 443 or $sweep.target.port = 445 or
+     $sweep.target.port = 3389 or $sweep.target.port = 135)
+
+  match:
+    $src_ip over 15m
+
+  condition:
+    count_distinct($sweep.target.ip) > 30
+
+  outcome:
+    $risk_score = 70
+    $unique_hosts = count_distinct($sweep.target.ip)
+    $ports_used = array_distinct($sweep.target.port)
+}
+
+rule recon_ad_enumeration {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects Active Directory enumeration via excessive LDAP queries from non-DC hosts."
+    severity = "Medium"
+    mitre_attack = "T1589"
+
+  events:
+    $ldap.metadata.event_type = "NETWORK_CONNECTION"
+    $ldap.principal.ip = $src_ip
+    $ldap.target.port = 389
+    $ldap.principal.hostname = $host
+    not re.regex($ldap.principal.hostname, `(?i)(DC|domaincontroller)`)
+
+  match:
+    $src_ip over 30m
+
+  condition:
+    #ldap > 100
+
+  outcome:
+    $risk_score = 70
+    $query_count = #ldap
+    $source_host = array_distinct($ldap.principal.hostname)
+    $target_dcs = array_distinct($ldap.target.ip)
+}
+
+/*
+ * TUNING: Exclude known vuln scanners (Nessus, Qualys, Rapid7). Adjust port/host thresholds.
+ * Exclude LDAP-heavy apps (SIEM agents, identity management).
+ * FALSE POSITIVES: Authorized vulnerability scans, PRTG/Nagios/Zabbix monitoring,
+ * SCCM inventory scans, DNS/DHCP server connections, identity sync tools.
+ */
+
+
+// ############################################################################
+// ############################################################################
+//
+//                    *** NEW DETECTION CATEGORIES ***
+//
+// ############################################################################
+// ############################################################################
+
+
+// ############################################################################
+// SECTION 11: FORWARDING RULE ABUSE
+// MITRE ATT&CK: T1114.003 (Email Collection: Email Forwarding Rule)
+// ############################################################################
+
+rule forwarding_rule_inbox_creation {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects creation of mailbox inbox rules that forward or redirect email to external addresses. Attackers create forwarding rules to maintain persistent access to email communications after initial compromise."
+    severity = "High"
+    mitre_attack = "T1114.003"
+
+  events:
+    // Office 365 / Google Workspace audit log — inbox rule creation
+    $rule.metadata.event_type = "EMAIL_UNCATEGORIZED"
+    $rule.principal.user.userid = $user
+
+    // Audit actions for rule creation
+    (re.regex($rule.metadata.product_event_type, `(?i)(New-InboxRule|Set-InboxRule|UpdateInboxRules|AddMailboxRule)`) or
+     re.regex($rule.security_result.description, `(?i)(ForwardTo|RedirectTo|forward|redirect)`))
+
+  match:
+    $user over 1h
+
+  condition:
+    #rule > 0
+
+  outcome:
+    $risk_score = 85
+    $rule_actions = array_distinct($rule.security_result.description)
+    $affected_users = array_distinct($rule.principal.user.userid)
+    $source_ips = array_distinct($rule.principal.ip)
+}
+
+rule forwarding_rule_powershell_creation {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects PowerShell or command-line creation of Exchange mail forwarding rules. Attackers use New-InboxRule, Set-Mailbox -ForwardingSmtpAddress, or Set-TransportRule to exfiltrate email."
+    severity = "Critical"
+    mitre_attack = "T1114.003"
+
+  events:
+    $cmd.metadata.event_type = "PROCESS_LAUNCH"
+    $cmd.principal.hostname = $host
+    $cmd.principal.user.userid = $user
+
+    // PowerShell creating or modifying inbox/transport rules
+    (re.regex($cmd.target.process.command_line, `(?i)New-InboxRule.*ForwardTo`) or
+     re.regex($cmd.target.process.command_line, `(?i)Set-Mailbox.*-ForwardingSmtpAddress`) or
+     re.regex($cmd.target.process.command_line, `(?i)Set-Mailbox.*-ForwardingAddress`) or
+     re.regex($cmd.target.process.command_line, `(?i)Set-TransportRule.*RedirectMessageTo`) or
+     re.regex($cmd.target.process.command_line, `(?i)New-TransportRule.*RedirectMessageTo`))
+
+  match:
+    $host over 1h
+
+  condition:
+    #cmd > 0
+
+  outcome:
+    $risk_score = 95
+    $commands_executed = array_distinct($cmd.target.process.command_line)
+    $users = array_distinct($cmd.principal.user.userid)
+}
+
+rule forwarding_rule_external_domain {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects mailbox rules configured to forward to external (non-corporate) domains. Cross-references rule target addresses against known corporate domains."
+    severity = "High"
+    mitre_attack = "T1114.003"
+
+  events:
+    $fwd.metadata.event_type = "EMAIL_UNCATEGORIZED"
+    $fwd.principal.user.userid = $user
+
+    // Rule modification or creation event
+    re.regex($fwd.metadata.product_event_type, `(?i)(New-InboxRule|Set-InboxRule|UpdateInboxRules)`)
+
+    // Forward target is NOT a corporate domain — customize this regex
+    re.regex($fwd.security_result.description, `(?i)(ForwardTo|RedirectTo)`)
+    not re.regex($fwd.security_result.description, `(?i)(@corp\.example\.com|@example\.com)`)
+
+  match:
+    $user over 24h
+
+  condition:
+    #fwd > 0
+
+  outcome:
+    $risk_score = 90
+    $forward_targets = array_distinct($fwd.security_result.description)
+    $users = array_distinct($fwd.principal.user.userid)
+}
+
+rule forwarding_rule_bulk_modification {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects a single user or admin modifying forwarding rules on multiple mailboxes in a short period, suggesting automated compromise or insider threat."
+    severity = "Critical"
+    mitre_attack = "T1114.003"
+
+  events:
+    $bulk.metadata.event_type = "EMAIL_UNCATEGORIZED"
+    $bulk.principal.user.userid = $actor
+    $bulk.target.user.userid = $target_mailbox
+
+    re.regex($bulk.metadata.product_event_type, `(?i)(New-InboxRule|Set-InboxRule|Set-Mailbox)`)
+    re.regex($bulk.security_result.description, `(?i)(ForwardTo|RedirectTo|ForwardingSmtpAddress)`)
+
+  match:
+    $actor over 1h
+
+  condition:
+    count_distinct($bulk.target.user.userid) >= 3
+
+  outcome:
+    $risk_score = 95
+    $mailboxes_modified = count_distinct($bulk.target.user.userid)
+    $target_users = array_distinct($bulk.target.user.userid)
+}
+
+/*
+ * TUNING:
+ * - Replace @corp.example.com / @example.com with your actual corporate domains
+ * - Exclude known admin accounts that legitimately manage transport rules
+ * - Integrate with Azure AD / Google Workspace admin audit logs for best coverage
+ * - Add delegation/impersonation context to identify admin-vs-user actions
+ * - Set up reference lists for approved external forwarding destinations (e.g., legal, auditors)
+ *
+ * FALSE POSITIVES:
+ * - Users forwarding to personal email during approved transitions
+ * - IT admins configuring shared mailbox forwarding
+ * - Migration tools creating temporary forwarding rules
+ * - Auto-forwarding configured by HR for departing employees
+ * - Compliance/legal forwarding to archival services
+ */
+
+
+// ############################################################################
+// SECTION 12: IMPOSSIBLE TRAVEL DETECTION
+// MITRE ATT&CK: T1078 (Valid Accounts), T1078.004 (Cloud Accounts)
+// ############################################################################
+
+rule impossible_travel_successive_logins {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects successive successful logins from geographically distant locations within a timeframe that makes physical travel impossible. Compares login pairs from different countries/cities for the same user."
+    severity = "High"
+    mitre_attack = "T1078"
+
+  events:
+    // First login event
+    $login1.metadata.event_type = "USER_LOGIN"
+    $login1.security_result.action = "ALLOW"
+    $login1.principal.user.userid = $user
+    $login1.principal.ip = $ip1
+    $login1.principal.location.country_or_region = $country1
+
+    // Second login event — same user, different location
+    $login2.metadata.event_type = "USER_LOGIN"
+    $login2.security_result.action = "ALLOW"
+    $login2.principal.user.userid = $user
+    $login2.principal.ip = $ip2
+    $login2.principal.location.country_or_region = $country2
+
+    // Different source IPs and different countries
+    $login1.principal.ip != $login2.principal.ip
+    $login1.principal.location.country_or_region != $login2.principal.location.country_or_region
+
+    // Second login within 2 hours of first
+    $login1.metadata.event_timestamp.seconds < $login2.metadata.event_timestamp.seconds
+    $login2.metadata.event_timestamp.seconds - $login1.metadata.event_timestamp.seconds < 7200
+
+  match:
+    $user over 2h
+
+  condition:
+    #login1 > 0 and #login2 > 0
+
+  outcome:
+    $risk_score = 85
+    $locations = array_distinct($login1.principal.location.country_or_region)
+    $source_ips = array_distinct($login1.principal.ip)
+    $login_count = #login1 + #login2
+}
+
+rule impossible_travel_city_level {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects logins from different cities within the same country in an impossibly short timeframe (under 30 minutes). More granular than country-level detection."
+    severity = "High"
+    mitre_attack = "T1078"
+
+  events:
+    $login1.metadata.event_type = "USER_LOGIN"
+    $login1.security_result.action = "ALLOW"
+    $login1.principal.user.userid = $user
+    $login1.principal.ip = $ip1
+    $login1.principal.location.city = $city1
+
+    $login2.metadata.event_type = "USER_LOGIN"
+    $login2.security_result.action = "ALLOW"
+    $login2.principal.user.userid = $user
+    $login2.principal.ip = $ip2
+    $login2.principal.location.city = $city2
+
+    $login1.principal.ip != $login2.principal.ip
+    $login1.principal.location.city != $login2.principal.location.city
+
+    // Within 30 minutes — impossible to travel between cities
+    $login1.metadata.event_timestamp.seconds < $login2.metadata.event_timestamp.seconds
+    $login2.metadata.event_timestamp.seconds - $login1.metadata.event_timestamp.seconds < 1800
+
+  match:
+    $user over 1h
+
+  condition:
+    #login1 > 0 and #login2 > 0
+
+  outcome:
+    $risk_score = 80
+    $cities = array_distinct($login1.principal.location.city)
+    $ips = array_distinct($login1.principal.ip)
+}
+
+rule impossible_travel_vpn_bypass {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects successful login from a foreign country immediately followed by or preceded by a corporate VPN login, suggesting credential compromise while VPN is in use."
+    severity = "Critical"
+    mitre_attack = "T1078.004"
+
+  events:
+    // VPN/corporate login
+    $vpn.metadata.event_type = "USER_LOGIN"
+    $vpn.security_result.action = "ALLOW"
+    $vpn.principal.user.userid = $user
+    $vpn.principal.location.country_or_region = $home_country
+
+    // Foreign login (cloud app, email, etc.)
+    $foreign.metadata.event_type = "USER_LOGIN"
+    $foreign.security_result.action = "ALLOW"
+    $foreign.principal.user.userid = $user
+    $foreign.principal.location.country_or_region = $foreign_country
+
+    // Different countries
+    $vpn.principal.location.country_or_region != $foreign.principal.location.country_or_region
+
+    // Overlapping or near-simultaneous (within 5 minutes)
+    $vpn.metadata.event_timestamp.seconds < $foreign.metadata.event_timestamp.seconds
+    $foreign.metadata.event_timestamp.seconds - $vpn.metadata.event_timestamp.seconds < 300
+
+  match:
+    $user over 1h
+
+  condition:
+    #vpn > 0 and #foreign > 0
+
+  outcome:
+    $risk_score = 95
+    $home_locations = array_distinct($vpn.principal.location.country_or_region)
+    $foreign_locations = array_distinct($foreign.principal.location.country_or_region)
+    $foreign_ips = array_distinct($foreign.principal.ip)
+}
+
+rule impossible_travel_new_country_first_login {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects first-time login from a country never seen before for this user. Baseline comparison requires enrichment or reference list of user-to-country mappings."
+    severity = "Medium"
+    mitre_attack = "T1078"
+
+  events:
+    $login.metadata.event_type = "USER_LOGIN"
+    $login.security_result.action = "ALLOW"
+    $login.principal.user.userid = $user
+    $login.principal.location.country_or_region = $country
+    $login.principal.ip = $ip
+
+    // Not a known VPN/proxy IP (customize with your VPN egress IPs)
+    not net.ip_in_range_cidr($login.principal.ip, "198.51.100.0/24")
+
+  match:
+    $user over 24h
+
+  condition:
+    #login > 0
+
+  outcome:
+    $risk_score = 60
+    $countries = array_distinct($login.principal.location.country_or_region)
+    $ips_used = array_distinct($login.principal.ip)
+    $login_count = #login
+}
+
+/*
+ * TUNING:
+ * - Maintain a reference list of corporate VPN egress IPs and exclude them from geo comparisons
+ * - Adjust the 2-hour window (7200s) based on your org's travel patterns
+ * - Exclude known cloud proxy IPs (Zscaler, Cloudflare WARP) that show varied geolocations
+ * - For city-level detection, tune the 30-minute window based on metro area sizes
+ * - Build per-user country baselines and alert only on NEW countries
+ * - Consider time zone context: a login at 3 AM local time + foreign country = higher risk
+ *
+ * FALSE POSITIVES:
+ * - VPN split-tunneling where corporate and personal traffic egress from different locations
+ * - Cloud proxy services (Zscaler, Netskope) that route traffic through global PoPs
+ * - Mobile users on cellular networks with poor geolocation accuracy
+ * - Users with dual SIM or eSIM (personal + business) in different regions
+ * - Corporate travel + hotel VPN = legitimate dual-country access
+ * - Shared accounts (should be flagged anyway for security hygiene)
+ */
+
+
+// ############################################################################
+// SECTION 13: SPAM BOT DETECTION
+// MITRE ATT&CK: T1566 (Phishing), T1071 (Application Layer Protocol), T1078 (Valid Accounts)
+// ############################################################################
+
+rule spam_bot_high_volume_outbound {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects compromised accounts sending abnormally high volumes of outbound email. Typical users send 50-100 emails/day — a compromised account may send thousands."
+    severity = "High"
+    mitre_attack = "T1078"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "OUTBOUND"
+    $email.principal.user.userid = $sender
+    $email.target.user.email_addresses = $recipient
+
+  match:
+    $sender over 1h
+
+  condition:
+    // More than 100 outbound emails in 1 hour is abnormal for most users
+    #email > 100
+
+  outcome:
+    $risk_score = 80
+    $email_count = #email
+    $unique_recipients = count_distinct($email.target.user.email_addresses)
+}
+
+rule spam_bot_many_unique_recipients {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects accounts sending to an unusually high number of unique external recipients, characteristic of spam campaigns or phishing distribution."
+    severity = "High"
+    mitre_attack = "T1566"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "OUTBOUND"
+    $email.principal.user.userid = $sender
+    $email.target.user.email_addresses = $recipient
+
+    // External recipients only
+    not re.regex($email.target.user.email_addresses, `(?i)@(corp\.example\.com|example\.com)$`)
+
+  match:
+    $sender over 4h
+
+  condition:
+    count_distinct($email.target.user.email_addresses) > 50
+
+  outcome:
+    $risk_score = 85
+    $unique_recipients = count_distinct($email.target.user.email_addresses)
+    $total_emails = #email
+}
+
+rule spam_bot_rapid_api_sends {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects rapid email sends via API/SMTP relay, indicating automated bot activity. Legitimate users cannot manually send emails at machine speed."
+    severity = "Critical"
+    mitre_attack = "T1071"
+
+  events:
+    $send.metadata.event_type = "EMAIL_TRANSACTION"
+    $send.network.direction = "OUTBOUND"
+    $send.principal.user.userid = $sender
+
+    // Sent via API or SMTP relay (not webmail UI)
+    (re.regex($send.security_result.description, `(?i)(SMTP|API|relay|automated)`) or
+     re.regex($send.network.application_protocol, `(?i)SMTP`))
+
+  match:
+    $sender over 10m
+
+  condition:
+    // 50+ emails in 10 minutes via SMTP/API = bot behavior
+    #send > 50
+
+  outcome:
+    $risk_score = 90
+    $send_count = #send
+    $send_methods = array_distinct($send.network.application_protocol)
+}
+
+rule spam_bot_bounced_email_spike {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects spike in bounced/NDR emails for a user, indicating the account is sending to invalid addresses (purchased email lists or spray campaigns)."
+    severity = "High"
+    mitre_attack = "T1078"
+
+  events:
+    $bounce.metadata.event_type = "EMAIL_TRANSACTION"
+    $bounce.principal.user.userid = $sender
+
+    // NDR / bounce indicators
+    (re.regex($bounce.security_result.description, `(?i)(bounce|NDR|undeliverable|rejected|5\.[0-9]\.[0-9])`) or
+     re.regex($bounce.metadata.product_event_type, `(?i)(bounce|NDR|delivery.failure)`))
+
+  match:
+    $sender over 1h
+
+  condition:
+    #bounce > 20
+
+  outcome:
+    $risk_score = 80
+    $bounce_count = #bounce
+}
+
+/*
+ * TUNING:
+ * - Replace @corp.example.com with your actual corporate domains
+ * - Adjust the 100 emails/hour threshold based on roles (marketing/sales may send more)
+ * - Exclude known marketing platforms (Mailchimp, HubSpot) service accounts
+ * - Exclude distribution lists and shared mailboxes from volume alerts
+ * - Build per-user sending baselines and alert on deviations (2x normal = suspicious)
+ * - Correlate with authentication anomalies (new IP + high send volume = compromised)
+ *
+ * FALSE POSITIVES:
+ * - Marketing teams sending campaigns via corporate email
+ * - Sales teams doing outreach to many external contacts
+ * - Automated notification systems (ticketing, alerts, newsletters)
+ * - HR bulk communications (benefits enrollment, policy updates)
+ * - Shared mailbox usage by multiple team members
+ * - Calendar invites to large distribution lists generating many SMTP transactions
+ */
+
+
+// ############################################################################
+// SECTION 14: EMAIL SPOOFING DETECTION
+// MITRE ATT&CK: T1566.001, T1566.002, T1534 (Internal Spearphishing)
+// ############################################################################
+
+rule spoofing_spf_dkim_dmarc_failure {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects inbound emails that fail SPF, DKIM, or DMARC authentication checks. Spoofed emails typically fail at least one of these controls."
+    severity = "High"
+    mitre_attack = "T1566.001"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "INBOUND"
+    $email.principal.user.email_addresses = $sender
+    $email.target.user.email_addresses = $recipient
+
+    // Authentication failure indicators
+    (re.regex($email.security_result.description, `(?i)(spf=fail|spf=softfail|dkim=fail|dmarc=fail|dmarc=none)`) or
+     re.regex($email.security_result.category, `(?i)(AUTH_VIOLATION|POLICY_VIOLATION)`))
+
+  match:
+    $sender over 1h
+
+  condition:
+    #email > 0
+
+  outcome:
+    $risk_score = 75
+    $auth_results = array_distinct($email.security_result.description)
+    $recipients = array_distinct($email.target.user.email_addresses)
+    $email_count = #email
+}
+
+rule spoofing_display_name_impersonation {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects emails where the display name matches a VIP/executive but the sending domain is external. Classic CEO fraud / BEC technique."
+    severity = "Critical"
+    mitre_attack = "T1534"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "INBOUND"
+    $email.principal.user.user_display_name = $display_name
+    $email.principal.user.email_addresses = $sender_email
+
+    // Display name matches known executives — customize this list
+    re.regex($email.principal.user.user_display_name, `(?i)(CEO Name|CFO Name|CTO Name|Chief Executive|Chief Financial)`)
+
+    // But email domain is NOT corporate
+    not re.regex($email.principal.user.email_addresses, `(?i)@(corp\.example\.com|example\.com)$`)
+
+  match:
+    $display_name over 24h
+
+  condition:
+    #email > 0
+
+  outcome:
+    $risk_score = 90
+    $spoofed_names = array_distinct($email.principal.user.user_display_name)
+    $actual_senders = array_distinct($email.principal.user.email_addresses)
+    $targets = array_distinct($email.target.user.email_addresses)
+}
+
+rule spoofing_lookalike_domain {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects emails from domains that closely resemble your corporate domain using typosquatting, homoglyphs, or character substitution (e.g., examp1e.com, exampl3.com, exarnple.com)."
+    severity = "High"
+    mitre_attack = "T1566.002"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "INBOUND"
+    $email.principal.user.email_addresses = $sender
+
+    // Lookalike domain patterns — customize for your domain
+    // Example: if your domain is "example.com", detect common typosquats
+    (re.regex($email.principal.user.email_addresses, `(?i)@(examp1e|exarnple|exampl3|exampIe|example\.co[^m]|example-corp|exmple|examplee)\.`) or
+     // Generic homoglyph patterns — domains with mixed scripts
+     re.regex($email.principal.user.email_addresses, `(?i)@.*[0oO][1lI].*\.(com|net|org)$`))
+
+  match:
+    $sender over 24h
+
+  condition:
+    #email > 0
+
+  outcome:
+    $risk_score = 85
+    $sender_domains = array_distinct($email.principal.user.email_addresses)
+    $recipients = array_distinct($email.target.user.email_addresses)
+}
+
+rule spoofing_reply_to_mismatch {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects emails where the Reply-To address domain differs from the From address domain. Attackers set Reply-To to their controlled mailbox while spoofing the From header."
+    severity = "Medium"
+    mitre_attack = "T1566.002"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "INBOUND"
+    $email.principal.user.email_addresses = $from_addr
+    $email.network.email.reply_to = $reply_to
+
+    // Reply-To exists and differs from From domain
+    strings.length($email.network.email.reply_to) > 0
+
+    // External sender
+    not re.regex($email.principal.user.email_addresses, `(?i)@(corp\.example\.com|example\.com)$`)
+
+  match:
+    $from_addr over 24h
+
+  condition:
+    #email > 0
+
+  outcome:
+    $risk_score = 70
+    $from_addresses = array_distinct($email.principal.user.email_addresses)
+    $reply_to_addresses = array_distinct($email.network.email.reply_to)
+    $recipients = array_distinct($email.target.user.email_addresses)
+}
+
+/*
+ * TUNING:
+ * - Replace executive names in display_name rule with actual org VIPs
+ * - Replace @corp.example.com with your actual corporate domains
+ * - Generate lookalike domain regex using tools like dnstwist for your specific domain
+ * - Consider integrating with DMARC aggregate reports for broader visibility
+ * - Exclude known third-party senders (marketing platforms, SaaS notifications)
+ * - SPF softfail may be legitimate for some third-party senders — tune accordingly
+ *
+ * FALSE POSITIVES:
+ * - Third-party email services sending on behalf of your domain (Mailchimp, Salesforce)
+ * - Partner organizations with similar domain names
+ * - Newsletter services where Reply-To legitimately differs from From
+ * - Newly onboarded SaaS tools not yet added to SPF record
+ * - Legitimate emails from free email providers (Gmail, Outlook.com) with executive names
+ * - Auto-forwarded emails that break DKIM signatures
+ */
+
+
+// ############################################################################
+// SECTION 15: ANOMALOUS PROCESS EXECUTION
+// MITRE ATT&CK: T1059, T1055, T1036, T1218, T1204
+// ############################################################################
+
+rule anomalous_process_unusual_parent_child {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects unusual parent-child process relationships that deviate from normal Windows process hierarchy. Examples: explorer.exe spawning cmd→powershell is normal; winword.exe spawning certutil.exe is not."
+    severity = "High"
+    mitre_attack = "T1059"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+    $proc.principal.user.userid = $user
+
+    // Suspicious parent-child combos
+    // Office apps spawning scripting engines
+    (re.regex($proc.principal.process.file.full_path, `(?i)(WINWORD|EXCEL|POWERPNT|OUTLOOK|ONENOTE)\.EXE$`) and
+     re.regex($proc.target.process.file.full_path, `(?i)(cmd\.exe|powershell\.exe|pwsh\.exe|wscript\.exe|cscript\.exe|mshta\.exe|certutil\.exe|bitsadmin\.exe|regsvr32\.exe)$`))
+
+    or
+
+    // Services spawning unexpected interpreters
+    (re.regex($proc.principal.process.file.full_path, `(?i)(w3wp\.exe|sqlservr\.exe|httpd\.exe|tomcat)`) and
+     re.regex($proc.target.process.file.full_path, `(?i)(cmd\.exe|powershell\.exe|whoami\.exe|net\.exe|net1\.exe)$`))
+
+    or
+
+    // WMI provider host spawning shells
+    (re.regex($proc.principal.process.file.full_path, `(?i)WmiPrvSE\.exe$`) and
+     re.regex($proc.target.process.file.full_path, `(?i)(cmd\.exe|powershell\.exe|pwsh\.exe)$`))
+
+  match:
+    $host over 1h
+
+  condition:
+    #proc > 0
+
+  outcome:
+    $risk_score = 85
+    $parent_processes = array_distinct($proc.principal.process.file.full_path)
+    $child_processes = array_distinct($proc.target.process.file.full_path)
+    $command_lines = array_distinct($proc.target.process.command_line)
+    $users = array_distinct($proc.principal.user.userid)
+}
+
+rule anomalous_process_temp_directory_execution {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects execution of binaries from temporary directories, user profile paths, or other non-standard locations commonly used by malware for staging."
+    severity = "High"
+    mitre_attack = "T1204"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+    $proc.target.process.file.full_path = $exe_path
+
+    // Execution from suspicious paths
+    (re.regex($proc.target.process.file.full_path, `(?i)(\\Temp\\|\\tmp\\|\\AppData\\Local\\Temp\\)`) or
+     re.regex($proc.target.process.file.full_path, `(?i)(\\Downloads\\|\\Desktop\\|\\Documents\\).*\.(exe|dll|scr|bat|cmd|ps1|vbs)$`) or
+     re.regex($proc.target.process.file.full_path, `(?i)(\\ProgramData\\[^\\]+\\[^\\]+\.(exe|dll))`) or
+     re.regex($proc.target.process.file.full_path, `(?i)(\\Users\\Public\\).*\.(exe|dll|scr)`))
+
+    // Exclude known legitimate temp-executing software
+    not re.regex($proc.target.process.file.full_path, `(?i)(\\Temp\\.*\\(DismHost|TiWorker|setup|installer))`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #proc > 0
+
+  outcome:
+    $risk_score = 75
+    $execution_paths = array_distinct($proc.target.process.file.full_path)
+    $command_lines = array_distinct($proc.target.process.command_line)
+    $users = array_distinct($proc.principal.user.userid)
+}
+
+rule anomalous_process_lolbin_abuse {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects abuse of Living-off-the-Land Binaries (LOLBins) — legitimate Windows binaries used for malicious purposes such as downloading payloads, executing code, or bypassing application controls."
+    severity = "High"
+    mitre_attack = "T1218"
+
+  events:
+    $lol.metadata.event_type = "PROCESS_LAUNCH"
+    $lol.principal.hostname = $host
+
+    // LOLBin executions with suspicious command-line arguments
+    (// certutil downloading files
+     (re.regex($lol.target.process.file.full_path, `(?i)certutil\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(-urlcache|-split|http|ftp)`))
+
+     or
+
+     // mshta executing remote content
+     (re.regex($lol.target.process.file.full_path, `(?i)mshta\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(http|javascript|vbscript)`))
+
+     or
+
+     // regsvr32 executing remote scriptlets
+     (re.regex($lol.target.process.file.full_path, `(?i)regsvr32\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(/s\s+/n\s+/u.*scrobj|http)`))
+
+     or
+
+     // rundll32 executing JavaScript or unusual DLLs
+     (re.regex($lol.target.process.file.full_path, `(?i)rundll32\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(javascript|mshtml|\\Temp\\|\\Downloads\\|http)`))
+
+     or
+
+     // bitsadmin downloading files
+     (re.regex($lol.target.process.file.full_path, `(?i)bitsadmin\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(/transfer.*http|/addfile)`))
+
+     or
+
+     // wmic process create or remote execution
+     (re.regex($lol.target.process.file.full_path, `(?i)wmic\.exe$`) and
+      re.regex($lol.target.process.command_line, `(?i)(process\s+call\s+create|/node:)`)))
+
+  match:
+    $host over 1h
+
+  condition:
+    #lol > 0
+
+  outcome:
+    $risk_score = 85
+    $lolbins_used = array_distinct($lol.target.process.file.full_path)
+    $commands = array_distinct($lol.target.process.command_line)
+    $users = array_distinct($lol.principal.user.userid)
+}
+
+rule anomalous_process_renamed_binary {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects execution of renamed system binaries — where the internal PE name does not match the file name on disk. Attackers rename malicious tools or copy system binaries to evade detection."
+    severity = "High"
+    mitre_attack = "T1036"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+
+    // PE metadata original filename does NOT match actual filename
+    $proc.target.process.file.pe_file.original_file_name = $original_name
+    $proc.target.process.file.full_path = $actual_path
+
+    // Original name is a known system binary
+    re.regex($proc.target.process.file.pe_file.original_file_name, `(?i)(cmd\.exe|powershell\.exe|pwsh\.exe|net\.exe|whoami\.exe|tasklist\.exe|schtasks\.exe|reg\.exe)`)
+
+    // But actual filename is different
+    not re.regex($proc.target.process.file.full_path, `(?i)\\(cmd|powershell|pwsh|net|whoami|tasklist|schtasks|reg)\.exe$`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #proc > 0
+
+  outcome:
+    $risk_score = 90
+    $original_names = array_distinct($proc.target.process.file.pe_file.original_file_name)
+    $actual_paths = array_distinct($proc.target.process.file.full_path)
+    $command_lines = array_distinct($proc.target.process.command_line)
+}
+
+/*
+ * TUNING:
+ * - Add org-specific legitimate temp-directory executables to exclusions (e.g., auto-updaters)
+ * - Expand LOLBin list from LOLBAS project (https://lolbas-project.github.io)
+ * - For parent-child rules, add legitimate automation tools that spawn cmd/powershell
+ * - Consider adding process hash comparison against known-good baselines
+ * - Tune renamed binary detection: some installers legitimately rename system utilities
+ * - Add application whitelisting context for higher-fidelity detections
+ *
+ * FALSE POSITIVES:
+ * - Software installers extracting and executing from %TEMP%
+ * - Auto-update mechanisms (Chrome, Firefox, Zoom) running from AppData
+ * - IT automation tools (Ansible, Chef, Puppet) spawning cmd/powershell from services
+ * - Developers running scripts from project directories on Desktop/Documents
+ * - Legitimate use of certutil for certificate management (without -urlcache)
+ * - SCCM/Intune deploying packages via bitsadmin
+ * - Virtualization guest tools using renamed binaries
+ */
+
+
+// ############################################################################
+// SECTION 16: ROUTINE THREAT HUNTING QUERIES
+// MITRE ATT&CK: T1053, T1547, T1105, T1569, T1543, T1574
+// Run these queries on a scheduled basis (daily/weekly) for proactive detection
+// ############################################################################
+
+rule hunting_new_scheduled_tasks {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Daily] Identifies all new scheduled tasks created in the last 24 hours. Review for persistence mechanisms, unauthorized automation, or malware callback timers."
+    severity = "Medium"
+    mitre_attack = "T1053.005"
+
+  events:
+    $task.metadata.event_type = "PROCESS_LAUNCH"
+    $task.principal.hostname = $host
+    $task.principal.user.userid = $user
+
+    (re.regex($task.target.process.file.full_path, `(?i)schtasks\.exe$`) and
+     re.regex($task.target.process.command_line, `(?i)/create`))
+
+    or
+
+    // PowerShell Register-ScheduledTask
+    re.regex($task.target.process.command_line, `(?i)Register-ScheduledTask`)
+
+  match:
+    $host over 24h
+
+  condition:
+    #task > 0
+
+  outcome:
+    $risk_score = 50
+    $task_commands = array_distinct($task.target.process.command_line)
+    $creating_users = array_distinct($task.principal.user.userid)
+    $hosts = array_distinct($task.principal.hostname)
+}
+
+rule hunting_new_services_installed {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Daily] Lists all new Windows services installed in the past 24 hours. Review for backdoors, RATs, and unauthorized software persistence."
+    severity = "Medium"
+    mitre_attack = "T1543.003"
+
+  events:
+    $svc.metadata.event_type = "PROCESS_LAUNCH"
+    $svc.principal.hostname = $host
+
+    // sc.exe create
+    (re.regex($svc.target.process.file.full_path, `(?i)sc\.exe$`) and
+     re.regex($svc.target.process.command_line, `(?i)\bcreate\b`))
+
+    or
+
+    // PowerShell New-Service
+    re.regex($svc.target.process.command_line, `(?i)New-Service`)
+
+  match:
+    $host over 24h
+
+  condition:
+    #svc > 0
+
+  outcome:
+    $risk_score = 55
+    $service_commands = array_distinct($svc.target.process.command_line)
+    $users = array_distinct($svc.principal.user.userid)
+    $hosts = array_distinct($svc.principal.hostname)
+}
+
+rule hunting_startup_folder_modifications {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Daily] Detects files written to Windows Startup folders. Malware commonly drops executables or scripts here for automatic execution at user logon."
+    severity = "Medium"
+    mitre_attack = "T1547.001"
+
+  events:
+    $file.metadata.event_type = "FILE_CREATION"
+    $file.principal.hostname = $host
+    $file.principal.user.userid = $user
+
+    // Startup folder paths
+    re.regex($file.target.file.full_path, `(?i)(\\Start Menu\\Programs\\Startup\\|\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\)`)
+
+  match:
+    $host over 24h
+
+  condition:
+    #file > 0
+
+  outcome:
+    $risk_score = 70
+    $files_created = array_distinct($file.target.file.full_path)
+    $users = array_distinct($file.principal.user.userid)
+}
+
+rule hunting_rare_process_execution {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Weekly] Identifies rarely-seen process names across the environment. Processes executed on fewer than 3 hosts in a week may be attacker tools, custom malware, or unauthorized software."
+    severity = "Low"
+    mitre_attack = "T1059"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+    $proc.target.process.file.full_path = $exe_path
+
+    // Exclude common Windows system binaries
+    not re.regex($proc.target.process.file.full_path, `(?i)\\Windows\\(System32|SysWOW64|WinSxS)\\`)
+    not re.regex($proc.target.process.file.full_path, `(?i)\\Program Files`)
+
+  match:
+    $exe_path over 7d
+
+  condition:
+    // Process seen on very few hosts — potential anomaly
+    count_distinct($proc.principal.hostname) < 3
+
+  outcome:
+    $risk_score = 40
+    $hosts_seen = count_distinct($proc.principal.hostname)
+    $host_names = array_distinct($proc.principal.hostname)
+    $users = array_distinct($proc.principal.user.userid)
+    $execution_count = #proc
+}
+
+rule hunting_unusual_outbound_connections {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Daily] Identifies outbound connections to rare external IPs — destinations contacted by fewer than 3 internal hosts. Potential C2, exfil, or unauthorized services."
+    severity = "Medium"
+    mitre_attack = "T1105"
+
+  events:
+    $conn.metadata.event_type = "NETWORK_CONNECTION"
+    $conn.principal.ip = $src_ip
+    $conn.target.ip = $dst_ip
+
+    // Internal source
+    net.ip_in_range_cidr($conn.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($conn.principal.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($conn.principal.ip, "192.168.0.0/16")
+
+    // External destination
+    not net.ip_in_range_cidr($conn.target.ip, "10.0.0.0/8")
+    not net.ip_in_range_cidr($conn.target.ip, "172.16.0.0/12")
+    not net.ip_in_range_cidr($conn.target.ip, "192.168.0.0/16")
+    not net.ip_in_range_cidr($conn.target.ip, "127.0.0.0/8")
+
+  match:
+    $dst_ip over 24h
+
+  condition:
+    // External IP contacted by fewer than 3 internal hosts = rare destination
+    count_distinct($conn.principal.ip) < 3
+
+  outcome:
+    $risk_score = 45
+    $internal_sources = array_distinct($conn.principal.ip)
+    $source_count = count_distinct($conn.principal.ip)
+    $connection_count = #conn
+}
+
+rule hunting_dll_sideloading_candidates {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Weekly] Detects DLL loads from non-standard directories for known sideloading-vulnerable executables. Attackers place malicious DLLs alongside legitimate executables to hijack execution."
+    severity = "Medium"
+    mitre_attack = "T1574.002"
+
+  events:
+    $load.metadata.event_type = "FILE_READ"
+    $load.principal.hostname = $host
+
+    // DLL loaded from unusual location
+    re.regex($load.target.file.full_path, `(?i)\.(dll)$`)
+
+    // Not from standard Windows or Program Files paths
+    not re.regex($load.target.file.full_path, `(?i)(\\Windows\\|\\Program Files|\\Program Files \(x86\))`)
+
+    // Loaded by a known sideloading target
+    re.regex($load.principal.process.file.full_path, `(?i)(\\OneDriveStandaloneUpdater\.exe|\\Teams\.exe|\\Zoom\.exe|\\vlc\.exe|\\python\.exe)`)
+
+  match:
+    $host over 7d
+
+  condition:
+    #load > 0
+
+  outcome:
+    $risk_score = 65
+    $dlls_loaded = array_distinct($load.target.file.full_path)
+    $loading_processes = array_distinct($load.principal.process.file.full_path)
+    $hosts = array_distinct($load.principal.hostname)
+}
+
+rule hunting_unsigned_executables {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Weekly] Identifies execution of unsigned or untrusted-signed executables. Most legitimate software is code-signed; unsigned binaries in non-development environments warrant investigation."
+    severity = "Low"
+    mitre_attack = "T1036"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+    $proc.target.process.file.full_path = $exe_path
+
+    // Unsigned or untrusted signature
+    ($proc.target.process.file.pe_file.signature_info.signed = false or
+     re.regex($proc.target.process.file.pe_file.signature_info.verification_message, `(?i)(unsigned|untrusted|expired|revoked)`))
+
+    // Not from temp/installer paths (too noisy)
+    not re.regex($proc.target.process.file.full_path, `(?i)\\Windows\\(Temp|Installer)\\`)
+
+  match:
+    $host over 7d
+
+  condition:
+    #proc > 0
+
+  outcome:
+    $risk_score = 35
+    $unsigned_executables = array_distinct($proc.target.process.file.full_path)
+    $users = array_distinct($proc.principal.user.userid)
+    $execution_count = #proc
+}
+
+/*
+ * TUNING:
+ * - Hunting rules are designed for SCHEDULED execution, not real-time alerting
+ * - Run daily rules every morning; weekly rules on Monday mornings
+ * - Maintain baseline reference lists: known services, approved startup items, approved DLLs
+ * - Adjust the "rare" thresholds (count_distinct < 3) based on environment size
+ * - For rare processes, start with high-confidence paths (not in ProgramFiles or System32)
+ * - Feed hunting results into your case management for analyst review
+ * - Integrate with threat intelligence for destination IP reputation
+ * - Build golden image baselines for servers vs. workstations
+ *
+ * FALSE POSITIVES:
+ * - Developer machines running custom/compiled tools (unsigned executables)
+ * - IT automation creating legitimate scheduled tasks and services
+ * - Software deployment tools dropping files in Startup folders during installation
+ * - Legitimate rarely-used admin tools (PsExec, ProcMon) on specific admin workstations
+ * - VPN and proxy tools that connect to rare external IPs
+ * - Sideloading detection may flag portable applications running from USB drives
+ * - Review hunting results in context: one anomaly alone isn't an incident;
+ *   multiple anomalies on the same host/user within a timeframe = escalate
+ */
+
+
+/*
+ * ============================================================================
+ *                        END OF QUERY LIBRARY
+ * ============================================================================
+ *
+ *  Total Sections: 16
+ *  Total Rules: 48
+ *  Platforms: Google SecOps (Chronicle) — YARA-L 2.0
+ *  MITRE Coverage: 40+ techniques across all 14 tactics
+ *
+ *  Author: Christian M. Njodzela
+ *  Repository: github.com/njodzela/soc-query-library
+ *  License: MIT
+ *
+ * ============================================================================
+ */

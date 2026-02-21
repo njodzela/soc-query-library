@@ -1,0 +1,104 @@
+-- ============================================================
+-- Title: Anomalous Process Execution Detection
+-- Description: Detects suspicious process execution including unusual
+--              parent-child relationships, temp directory execution,
+--              renamed binaries, and LOLBins abuse.
+-- MITRE ATT&CK: T1059 (Command and Scripting Interpreter),
+--               T1055 (Process Injection), T1036 (Masquerading),
+--               T1218 (System Binary Proxy Execution)
+-- Severity: High
+-- Data Sources: Windows Security Events (4688), Sysmon (Event 1), EDR
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Suspicious parent-child process relationships ===
+-- Office applications spawning command interpreters
+SELECT
+    starttime AS event_time,
+    sourceip AS host,
+    username,
+    UTF8(payload) AS raw_event,
+    LOGSOURCENAME(logsourceid) AS log_source
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Windows%Security%'
+    AND "EventID" = '4688'
+    AND (UTF8(payload) ILIKE '%winword.exe%' OR UTF8(payload) ILIKE '%excel.exe%'
+         OR UTF8(payload) ILIKE '%powerpnt.exe%' OR UTF8(payload) ILIKE '%outlook.exe%')
+    AND (UTF8(payload) ILIKE '%cmd.exe%' OR UTF8(payload) ILIKE '%powershell.exe%'
+         OR UTF8(payload) ILIKE '%wscript.exe%' OR UTF8(payload) ILIKE '%cscript.exe%'
+         OR UTF8(payload) ILIKE '%mshta.exe%' OR UTF8(payload) ILIKE '%certutil.exe%')
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- === Scenario 2: Execution from temp or user-writable directories ===
+-- Binaries running from suspicious paths
+SELECT
+    starttime AS event_time,
+    sourceip AS host,
+    username,
+    UTF8(payload) AS raw_event,
+    COUNT(*) AS occurrences
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Windows%Security%'
+    AND "EventID" = '4688'
+    AND (UTF8(payload) ILIKE '%\\Temp\\%'
+         OR UTF8(payload) ILIKE '%\\tmp\\%'
+         OR UTF8(payload) ILIKE '%\\Downloads\\%'
+         OR UTF8(payload) ILIKE '%\\AppData\\Local\\%'
+         OR UTF8(payload) ILIKE '%\\Users\\Public\\%')
+GROUP BY starttime, sourceip, username, UTF8(payload)
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- === Scenario 3: LOLBins with suspicious command lines ===
+-- Living-off-the-land binaries used for download or proxy execution
+SELECT
+    starttime AS event_time,
+    sourceip AS host,
+    username,
+    UTF8(payload) AS raw_event
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Windows%Security%'
+    AND "EventID" = '4688'
+    AND (UTF8(payload) ILIKE '%certutil%' OR UTF8(payload) ILIKE '%bitsadmin%'
+         OR UTF8(payload) ILIKE '%mshta%' OR UTF8(payload) ILIKE '%regsvr32%'
+         OR UTF8(payload) ILIKE '%rundll32%' OR UTF8(payload) ILIKE '%msiexec%'
+         OR UTF8(payload) ILIKE '%wmic%' OR UTF8(payload) ILIKE '%msbuild%')
+    AND (UTF8(payload) ILIKE '%http%' OR UTF8(payload) ILIKE '%ftp%'
+         OR UTF8(payload) ILIKE '%-decode%' OR UTF8(payload) ILIKE '%-urlcache%'
+         OR UTF8(payload) ILIKE '%scrobj.dll%' OR UTF8(payload) ILIKE '%javascript:%')
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- === Scenario 4: Rare process execution ===
+-- Identifies uncommon processes across the environment
+SELECT
+    UTF8(payload) AS process_info,
+    COUNT(*) AS execution_count,
+    COUNT(DISTINCT sourceip) AS host_count,
+    MIN(starttime) AS first_seen,
+    MAX(starttime) AS last_seen
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Windows%Security%'
+    AND "EventID" = '4688'
+GROUP BY UTF8(payload)
+HAVING COUNT(*) < 3 AND COUNT(DISTINCT sourceip) = 1
+ORDER BY execution_count ASC
+LAST 24 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Create custom properties to parse process name and command line
+-- - Use reference sets for known good process baselines
+-- - Exclude approved admin tools and deployment scripts
+-- - Enable command-line auditing in Windows for full visibility
+-- - Correlate with Sysmon events for richer context
+--
+-- FALSE POSITIVES:
+-- - Software installers running from temp directories
+-- - IT management tools using LOLBins (SCCM, Intune)
+-- - Developers using MSBuild and other build tools
+-- - Legitimate DLL registration during installation
+-- - Windows Update processes
+-- ============================================================

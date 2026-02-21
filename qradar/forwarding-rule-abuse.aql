@@ -1,0 +1,93 @@
+-- ============================================================
+-- Title: Forwarding Rule Abuse Detection
+-- Description: Detects creation or modification of mailbox forwarding
+--              rules indicating potential email exfiltration.
+-- MITRE ATT&CK: T1114.003 (Email Forwarding Rule), T1114 (Email Collection)
+-- Severity: High
+-- Data Sources: Microsoft O365 Audit Logs, Exchange Logs, PowerShell Logs
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: New inbox rule with forwarding action ===
+-- Detects creation of inbox rules that forward or redirect email
+SELECT
+    starttime AS event_time,
+    username AS actor,
+    LOGSOURCENAME(logsourceid) AS log_source,
+    UTF8(payload) AS raw_event,
+    sourceip AS client_ip
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Office 365%'
+    AND UTF8(payload) ILIKE '%New-InboxRule%'
+    AND (UTF8(payload) ILIKE '%ForwardTo%'
+         OR UTF8(payload) ILIKE '%ForwardAsAttachmentTo%'
+         OR UTF8(payload) ILIKE '%RedirectTo%')
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- === Scenario 2: Transport rule manipulation ===
+-- Monitors for new or modified transport rules with redirect actions
+SELECT
+    starttime AS event_time,
+    username AS actor,
+    UTF8(payload) AS raw_event,
+    sourceip AS client_ip
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Office 365%'
+    AND (UTF8(payload) ILIKE '%New-TransportRule%'
+         OR UTF8(payload) ILIKE '%Set-TransportRule%'
+         OR UTF8(payload) ILIKE '%Enable-TransportRule%')
+    AND (UTF8(payload) ILIKE '%BlindCopyTo%'
+         OR UTF8(payload) ILIKE '%RedirectMessageTo%'
+         OR UTF8(payload) ILIKE '%CopyTo%')
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- === Scenario 3: Set-Mailbox forwarding configuration ===
+-- Detects mailbox-level forwarding via PowerShell or admin actions
+SELECT
+    starttime AS event_time,
+    username AS actor,
+    UTF8(payload) AS raw_event,
+    sourceip AS client_ip
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Office 365%'
+    AND UTF8(payload) ILIKE '%Set-Mailbox%'
+    AND (UTF8(payload) ILIKE '%ForwardingSmtpAddress%'
+         OR UTF8(payload) ILIKE '%ForwardingAddress%')
+ORDER BY event_time DESC
+LAST 24 HOURS
+
+-- === Scenario 4: Bulk forwarding rule changes ===
+-- Flags a single actor modifying forwarding on multiple mailboxes
+SELECT
+    sourceip AS client_ip,
+    username AS actor,
+    COUNT(*) AS rule_changes,
+    COUNT(DISTINCT username) AS affected_mailboxes,
+    MIN(starttime) AS first_change,
+    MAX(starttime) AS last_change
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Office 365%'
+    AND (UTF8(payload) ILIKE '%New-InboxRule%' OR UTF8(payload) ILIKE '%Set-InboxRule%')
+    AND (UTF8(payload) ILIKE '%ForwardTo%' OR UTF8(payload) ILIKE '%RedirectTo%')
+GROUP BY sourceip, username
+HAVING COUNT(*) > 3
+ORDER BY rule_changes DESC
+LAST 1 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Whitelist known IT admin accounts that manage mail rules
+-- - Add custom properties to extract forwarding target addresses
+-- - Create reference sets for approved external forwarding domains
+-- - Correlate with authentication anomalies for higher fidelity
+-- - Adjust the bulk threshold based on admin team size
+--
+-- FALSE POSITIVES:
+-- - IT administrators configuring forwarding for departing employees
+-- - Legitimate personal forwarding (policy-dependent)
+-- - Migration tools reconfiguring mailbox settings
+-- - Shared mailbox management operations
+-- ============================================================

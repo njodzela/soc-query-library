@@ -1,0 +1,213 @@
+/*
+ * Title:        Routine Threat Hunting Queries
+ * Description:  Proactive hunting rules designed for scheduled execution (daily/weekly)
+ *               to identify new scheduled tasks, services, startup modifications,
+ *               rare processes, unusual outbound connections, and DLL sideloading.
+ * MITRE ATT&CK: T1053 (Scheduled Task/Job), T1547 (Boot/Logon Autostart),
+ *               T1105 (Ingress Tool Transfer), T1569 (System Services),
+ *               T1543 (Create or Modify System Process), T1574 (Hijack Execution Flow)
+ * Severity:     Medium
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Process Events, File Events, Network Events, EDR Telemetry
+ */
+
+// =============================================================================
+// Scenario 1: [HUNTING — Run Daily] New scheduled tasks created
+// =============================================================================
+rule hunting_new_scheduled_tasks {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Daily] Identifies all new scheduled tasks created in the last 24 hours. Review for persistence mechanisms, unauthorized automation, or malware callback timers."
+    severity = "Medium"
+    mitre_attack = "T1053.005"
+
+  events:
+    $task.metadata.event_type = "PROCESS_LAUNCH"
+    $task.principal.hostname = $host
+    $task.principal.user.userid = $user
+
+    (re.regex($task.target.process.file.full_path, `(?i)schtasks\.exe$`) and
+     re.regex($task.target.process.command_line, `(?i)/create`))
+
+    or
+
+    // PowerShell Register-ScheduledTask
+    re.regex($task.target.process.command_line, `(?i)Register-ScheduledTask`)
+
+  match:
+    $host over 24h
+
+  condition:
+    #task > 0
+
+  outcome:
+    $risk_score = 50
+    $task_commands = array_distinct($task.target.process.command_line)
+    $creating_users = array_distinct($task.principal.user.userid)
+    $hosts = array_distinct($task.principal.hostname)
+}
+
+// =============================================================================
+// Scenario 2: [HUNTING — Run Daily] New services installed
+// =============================================================================
+rule hunting_new_services_installed {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Daily] Lists all new Windows services installed in the past 24 hours. Review for backdoors, RATs, and unauthorized software persistence."
+    severity = "Medium"
+    mitre_attack = "T1543.003"
+
+  events:
+    $svc.metadata.event_type = "PROCESS_LAUNCH"
+    $svc.principal.hostname = $host
+
+    // sc.exe create
+    (re.regex($svc.target.process.file.full_path, `(?i)sc\.exe$`) and
+     re.regex($svc.target.process.command_line, `(?i)\bcreate\b`))
+
+    or
+
+    // PowerShell New-Service
+    re.regex($svc.target.process.command_line, `(?i)New-Service`)
+
+  match:
+    $host over 24h
+
+  condition:
+    #svc > 0
+
+  outcome:
+    $risk_score = 55
+    $service_commands = array_distinct($svc.target.process.command_line)
+    $users = array_distinct($svc.principal.user.userid)
+    $hosts = array_distinct($svc.principal.hostname)
+}
+
+// =============================================================================
+// Scenario 3: [HUNTING — Run Daily] Startup folder modifications
+// =============================================================================
+rule hunting_startup_folder_modifications {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Daily] Detects files written to Windows Startup folders. Malware commonly drops executables or scripts here for automatic execution at user logon."
+    severity = "Medium"
+    mitre_attack = "T1547.001"
+
+  events:
+    $file.metadata.event_type = "FILE_CREATION"
+    $file.principal.hostname = $host
+    $file.principal.user.userid = $user
+
+    // Startup folder paths
+    re.regex($file.target.file.full_path, `(?i)(\\Start Menu\\Programs\\Startup\\|\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\)`)
+
+  match:
+    $host over 24h
+
+  condition:
+    #file > 0
+
+  outcome:
+    $risk_score = 70
+    $files_created = array_distinct($file.target.file.full_path)
+    $users = array_distinct($file.principal.user.userid)
+}
+
+// =============================================================================
+// Scenario 4: [HUNTING — Run Weekly] Rarely-seen processes
+// =============================================================================
+rule hunting_rare_process_execution {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Weekly] Identifies rarely-seen process names across the environment. Processes executed on fewer than 3 hosts in a week may be attacker tools, custom malware, or unauthorized software."
+    severity = "Low"
+    mitre_attack = "T1059"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+    $proc.target.process.file.full_path = $exe_path
+
+    // Exclude common Windows system binaries
+    not re.regex($proc.target.process.file.full_path, `(?i)\\Windows\\(System32|SysWOW64|WinSxS)\\`)
+    not re.regex($proc.target.process.file.full_path, `(?i)\\Program Files`)
+
+  match:
+    $exe_path over 7d
+
+  condition:
+    count_distinct($proc.principal.hostname) < 3
+
+  outcome:
+    $risk_score = 40
+    $hosts_seen = count_distinct($proc.principal.hostname)
+    $host_names = array_distinct($proc.principal.hostname)
+    $users = array_distinct($proc.principal.user.userid)
+    $execution_count = #proc
+}
+
+// =============================================================================
+// Scenario 5: [HUNTING — Run Daily] Unusual outbound connections
+// =============================================================================
+rule hunting_unusual_outbound_connections {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "[HUNTING — Run Daily] Identifies outbound connections to rare external IPs — destinations contacted by fewer than 3 internal hosts. Potential C2, exfil, or unauthorized services."
+    severity = "Medium"
+    mitre_attack = "T1105"
+
+  events:
+    $conn.metadata.event_type = "NETWORK_CONNECTION"
+    $conn.principal.ip = $src_ip
+    $conn.target.ip = $dst_ip
+
+    // Internal source
+    net.ip_in_range_cidr($conn.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($conn.principal.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($conn.principal.ip, "192.168.0.0/16")
+
+    // External destination
+    not net.ip_in_range_cidr($conn.target.ip, "10.0.0.0/8")
+    not net.ip_in_range_cidr($conn.target.ip, "172.16.0.0/12")
+    not net.ip_in_range_cidr($conn.target.ip, "192.168.0.0/16")
+    not net.ip_in_range_cidr($conn.target.ip, "127.0.0.0/8")
+
+  match:
+    $dst_ip over 24h
+
+  condition:
+    count_distinct($conn.principal.ip) < 3
+
+  outcome:
+    $risk_score = 45
+    $internal_sources = array_distinct($conn.principal.ip)
+    $source_count = count_distinct($conn.principal.ip)
+    $connection_count = #conn
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Hunting rules are designed for SCHEDULED execution, not real-time alerting
+ * - Run daily rules every morning; weekly rules on Monday mornings
+ * - Maintain baseline reference lists: known services, approved startup items, approved DLLs
+ * - Adjust the "rare" thresholds (count_distinct < 3) based on environment size
+ * - For rare processes, start with high-confidence paths (not in ProgramFiles or System32)
+ * - Feed hunting results into your case management for analyst review
+ * - Integrate with threat intelligence for destination IP reputation
+ * - Build golden image baselines for servers vs. workstations
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - Developer machines running custom/compiled tools (unsigned executables)
+ * - IT automation creating legitimate scheduled tasks and services
+ * - Software deployment tools dropping files in Startup folders during installation
+ * - Legitimate rarely-used admin tools (PsExec, ProcMon) on specific admin workstations
+ * - VPN and proxy tools that connect to rare external IPs
+ * - Review hunting results in context: one anomaly alone isn't an incident;
+ *   multiple anomalies on the same host/user within a timeframe = escalate
+ */

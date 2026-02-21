@@ -1,0 +1,88 @@
+// ============================================================
+// Title: Spam Bot Detection
+// Description: Detects compromised accounts sending mass emails,
+//              unusual outbound volumes, and bot-like email behavior.
+// MITRE ATT&CK: T1566 (Phishing), T1071.003 (Mail Protocols)
+// Severity: High
+// Data Sources: OfficeActivity, EmailEvents, AuditLogs
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Abnormal outbound email volume ===
+// Detects users sending significantly more email than their baseline
+let LookbackBaseline = 14d;
+let DetectionWindow = 1h;
+let Threshold = 3; // Standard deviations
+EmailEvents
+| where TimeGenerated > ago(LookbackBaseline)
+| where EmailDirection == "Outbound"
+| summarize HourlyCount = count() by SenderFromAddress, bin(TimeGenerated, 1h)
+| summarize AvgHourly = avg(HourlyCount), StdDev = stdev(HourlyCount),
+    LatestCount = arg_max(TimeGenerated, HourlyCount) by SenderFromAddress
+| extend UpperBound = AvgHourly + (Threshold * StdDev)
+| where HourlyCount > UpperBound and HourlyCount > 50
+| extend AnomalyScore = round((HourlyCount - AvgHourly) / StdDev, 2)
+| project SenderFromAddress, HourlyCount, AvgHourly = round(AvgHourly, 1), UpperBound = round(UpperBound, 1), AnomalyScore
+| sort by AnomalyScore desc
+
+// === Scenario 2: Mass external email sending ===
+// Flags accounts sending bulk email to many external recipients
+EmailEvents
+| where TimeGenerated > ago(1h)
+| where EmailDirection == "Outbound"
+| where RecipientEmailAddress !endswith "yourdomain.com"
+| summarize
+    ExternalEmails = count(),
+    UniqueRecipients = dcount(RecipientEmailAddress),
+    UniqueDomains = dcount(tostring(split(RecipientEmailAddress, "@")[1]))
+    by SenderFromAddress, bin(TimeGenerated, 1h)
+| where ExternalEmails > 100 or UniqueDomains > 20
+| sort by ExternalEmails desc
+
+// === Scenario 3: Emails with high delivery failure rate ===
+// Identifies spam-like behavior through bounce rates
+EmailEvents
+| where TimeGenerated > ago(4h)
+| where EmailDirection == "Outbound"
+| summarize
+    TotalSent = count(),
+    Delivered = countif(DeliveryAction == "Delivered"),
+    Failed = countif(DeliveryAction != "Delivered")
+    by SenderFromAddress
+| extend FailureRate = round(toreal(Failed) / TotalSent * 100, 2)
+| where FailureRate > 30 and TotalSent > 20
+| sort by FailureRate desc
+
+// === Scenario 4: First-time bulk sender detection ===
+// Identifies accounts that suddenly start sending high volumes
+let HistoricalPeriod = 30d;
+let RecentPeriod = 24h;
+let HistoricSenders = EmailEvents
+    | where TimeGenerated between (ago(HistoricalPeriod) .. ago(RecentPeriod))
+    | where EmailDirection == "Outbound"
+    | summarize HistoricDaily = count() / 30 by SenderFromAddress
+    | where HistoricDaily > 20;
+EmailEvents
+| where TimeGenerated > ago(RecentPeriod)
+| where EmailDirection == "Outbound"
+| summarize RecentCount = count() by SenderFromAddress
+| where RecentCount > 50
+| join kind=leftanti HistoricSenders on SenderFromAddress
+| sort by RecentCount desc
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Replace "yourdomain.com" with actual internal domains
+// - Adjust baseline window (14d) based on data retention
+// - Exclude known marketing/notification accounts
+// - Set per-department thresholds for email volume
+// - Consider integrating with Exchange Online mail flow rules
+//
+// FALSE POSITIVES:
+// - Marketing teams running campaigns
+// - Automated notification systems
+// - Calendar invitations to large groups
+// - IT bulk communications
+// - Auto-reply storms during holidays
+// ============================================================

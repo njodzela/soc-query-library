@@ -1,0 +1,93 @@
+-- ============================================================
+-- Title: Spam Bot Detection
+-- Description: Detects compromised accounts sending mass emails
+--              or exhibiting bot-like sending behavior.
+-- MITRE ATT&CK: T1566 (Phishing), T1071.003 (Mail Protocols)
+-- Severity: High
+-- Data Sources: Exchange Message Tracking, SMTP Gateway, O365 Logs
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: High-volume outbound email per user ===
+-- Detects users sending unusually high volumes of email
+SELECT
+    username AS sender,
+    COUNT(*) AS emails_sent,
+    COUNT(DISTINCT destinationip) AS unique_recipients,
+    MIN(starttime) AS first_email,
+    MAX(starttime) AS last_email
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Exchange%'
+    AND category = 'Email'
+    AND UTF8(payload) ILIKE '%SEND%'
+GROUP BY username
+HAVING COUNT(*) > 100
+ORDER BY emails_sent DESC
+LAST 1 HOURS
+
+-- === Scenario 2: Mass external email sending ===
+-- Flags accounts sending bulk email to external domains
+SELECT
+    username AS sender,
+    COUNT(*) AS external_emails,
+    COUNT(DISTINCT UTF8(payload)) AS unique_subjects,
+    MIN(starttime) AS first_send,
+    MAX(starttime) AS last_send
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Exchange%'
+    AND category = 'Email'
+    AND UTF8(payload) ILIKE '%SEND%'
+    AND UTF8(payload) NOT ILIKE '%@yourdomain.com%'
+GROUP BY username
+HAVING COUNT(*) > 50
+ORDER BY external_emails DESC
+LAST 1 HOURS
+
+-- === Scenario 3: High email bounce/failure rate ===
+-- Identifies accounts generating excessive delivery failures
+SELECT
+    username AS sender,
+    SUM(CASE WHEN UTF8(payload) ILIKE '%FAIL%' OR UTF8(payload) ILIKE '%DSN%' THEN 1 ELSE 0 END) AS bounces,
+    COUNT(*) AS total_sent,
+    ROUND(SUM(CASE WHEN UTF8(payload) ILIKE '%FAIL%' OR UTF8(payload) ILIKE '%DSN%' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS bounce_rate
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Exchange%'
+    AND category = 'Email'
+GROUP BY username
+HAVING bounce_rate > 30 AND total_sent > 20
+ORDER BY bounce_rate DESC
+LAST 4 HOURS
+
+-- === Scenario 4: Rapid email sending — bot-like velocity ===
+-- Detects accounts sending many emails in very short bursts
+SELECT
+    username AS sender,
+    COUNT(*) AS emails_in_window,
+    MIN(starttime) AS window_start,
+    MAX(starttime) AS window_end,
+    (MAX(starttime) - MIN(starttime)) / 1000 AS duration_seconds
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Exchange%'
+    AND category = 'Email'
+    AND UTF8(payload) ILIKE '%SEND%'
+GROUP BY username
+HAVING COUNT(*) > 30 AND (MAX(starttime) - MIN(starttime)) < 300000  -- 5 minutes
+ORDER BY emails_in_window DESC
+LAST 1 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Replace "yourdomain.com" with actual internal domains
+-- - Use reference sets for approved bulk senders
+-- - Adjust volume thresholds per department baseline
+-- - Exclude known marketing and notification accounts
+-- - Create custom properties to parse sender/recipient fields
+--
+-- FALSE POSITIVES:
+-- - Marketing campaigns and newsletters
+-- - IT notification systems
+-- - Calendar invitations to large distribution lists
+-- - Auto-reply storms during out-of-office periods
+-- - Mailing list announcements
+-- ============================================================

@@ -1,0 +1,126 @@
+// =============================================================================
+// Title:        Spam Bot Detection
+// Description:  Detects compromised accounts being used as spam bots by identifying
+//               abnormal outbound email volume, excessive unique recipients, rapid
+//               sends, and bounced email spikes.
+// MITRE ATT&CK: T1566 (Phishing), T1071 (Application Layer Protocol),
+//               T1078 (Valid Accounts)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  EmailEvents, CloudAppEvents, IdentityLogonEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: High-volume outbound email from a single account
+// Detects users sending 100+ emails in 1 hour (normal is ~10-20/hour)
+// -----------------------------------------------------------------------------
+let VolumeThreshold = 100;
+EmailEvents
+| where Timestamp > ago(1h)
+| where EmailDirection == "Outbound"
+| summarize
+    EmailCount = count(),
+    UniqueRecipients = dcount(RecipientEmailAddress),
+    RecipientSample = make_set(RecipientEmailAddress, 20),
+    Subjects = make_set(Subject, 10),
+    FirstSent = min(Timestamp),
+    LastSent = max(Timestamp)
+    by SenderFromAddress
+| where EmailCount >= VolumeThreshold
+| extend AlertSeverity = iff(EmailCount > 500, "Critical", "High")
+| project SenderFromAddress, EmailCount, UniqueRecipients, RecipientSample,
+    Subjects, FirstSent, LastSent, AlertSeverity
+| sort by EmailCount desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Many unique external recipients (spam distribution pattern)
+// Detects sending to 50+ unique external recipients in 4 hours
+// -----------------------------------------------------------------------------
+let RecipientThreshold = 50;
+EmailEvents
+| where Timestamp > ago(4h)
+| where EmailDirection == "Outbound"
+// External recipients only — customize domain
+| where RecipientEmailAddress !endswith "@corp.example.com"
+    and RecipientEmailAddress !endswith "@example.com"
+| summarize
+    TotalEmails = count(),
+    UniqueExternalRecipients = dcount(RecipientEmailAddress),
+    ExternalRecipientSample = make_set(RecipientEmailAddress, 20),
+    Subjects = make_set(Subject, 10)
+    by SenderFromAddress
+| where UniqueExternalRecipients >= RecipientThreshold
+| extend AlertSeverity = "High"
+| project SenderFromAddress, TotalEmails, UniqueExternalRecipients,
+    ExternalRecipientSample, Subjects, AlertSeverity
+| sort by UniqueExternalRecipients desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Rapid-fire email sends (machine-speed sending pattern)
+// Detects 50+ emails in 10 minutes suggesting automated/bot activity
+// -----------------------------------------------------------------------------
+let RapidThreshold = 50;
+let RapidWindow = 10m;
+EmailEvents
+| where Timestamp > ago(1h)
+| where EmailDirection == "Outbound"
+| summarize
+    EmailCount = count(),
+    FirstSent = min(Timestamp),
+    LastSent = max(Timestamp),
+    UniqueRecipients = dcount(RecipientEmailAddress),
+    UniqueSubjects = dcount(Subject)
+    by SenderFromAddress, bin(Timestamp, 10m)
+| where EmailCount >= RapidThreshold
+// Low subject diversity + high volume = bot behavior
+| extend SubjectDiversityRatio = round(toreal(UniqueSubjects) / EmailCount, 2)
+| extend AlertSeverity = "Critical"
+| project SenderFromAddress, EmailCount, UniqueRecipients, UniqueSubjects,
+    SubjectDiversityRatio, FirstSent, LastSent, AlertSeverity
+| sort by EmailCount desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 4: Bounced/NDR email spike (sending to invalid addresses)
+// Correlates high send volume with delivery failures
+// -----------------------------------------------------------------------------
+let BounceThreshold = 20;
+EmailEvents
+| where Timestamp > ago(1h)
+| where EmailDirection == "Outbound"
+| where DeliveryAction in ("Blocked", "Failed", "Replaced")
+    or LatestDeliveryAction in ("Blocked", "Failed")
+| summarize
+    BounceCount = count(),
+    UniqueFailedRecipients = dcount(RecipientEmailAddress),
+    FailedRecipientSample = make_set(RecipientEmailAddress, 20),
+    DeliveryActions = make_set(DeliveryAction)
+    by SenderFromAddress
+| where BounceCount >= BounceThreshold
+| extend AlertSeverity = "High"
+| project SenderFromAddress, BounceCount, UniqueFailedRecipients,
+    FailedRecipientSample, DeliveryActions, AlertSeverity
+| sort by BounceCount desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Replace @corp.example.com / @example.com with your actual corporate domains
+// - Adjust VolumeThreshold (100) based on role — sales/marketing may send more
+// - Exclude known service accounts for marketing platforms (Mailchimp, HubSpot)
+// - Exclude shared mailboxes and distribution list senders
+// - Build per-user sending baselines: alert when volume exceeds 2x their norm
+// - Correlate with sign-in anomalies: new IP + high send volume = compromised
+// - Consider adding EmailUrlInfo join to check for phishing URLs in outbound mail
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - Marketing teams running email campaigns through corporate mail
+// - Sales outreach sequences via CRM integrations
+// - Automated notification systems (ticketing, CI/CD alerts, newsletters)
+// - HR bulk communications (benefits enrollment, policy updates)
+// - Shared mailbox usage by multiple team members
+// - Calendar invites to large groups generating many SMTP transactions
+// =============================================================================

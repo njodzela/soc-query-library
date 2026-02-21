@@ -1,0 +1,82 @@
+// ============================================================
+// Title: Anomalous Process Execution Detection
+// Description: Detects suspicious process execution including unusual
+//              parent-child relationships, temp directory execution,
+//              renamed system binaries, and LOLBins abuse.
+// MITRE ATT&CK: T1059 (Command and Scripting Interpreter),
+//               T1055 (Process Injection), T1036 (Masquerading),
+//               T1218 (System Binary Proxy Execution)
+// Severity: High
+// Data Sources: SecurityEvent, Sysmon (Event 1), DeviceProcessEvents
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Suspicious parent-child process relationships ===
+// Office apps spawning command interpreters or LOLBins
+let SuspiciousParents = dynamic(["winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "acrobat.exe", "acrord32.exe"]);
+let SuspiciousChildren = dynamic(["cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe", "mshta.exe", "certutil.exe", "bitsadmin.exe", "regsvr32.exe", "rundll32.exe"]);
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4688
+| extend ParentProcess = tolower(tostring(split(ParentProcessName, "\\")[-1]))
+| extend ChildProcess = tolower(tostring(split(NewProcessName, "\\")[-1]))
+| where ParentProcess in (SuspiciousParents) and ChildProcess in (SuspiciousChildren)
+| project TimeGenerated, Computer, Account, ParentProcess, ChildProcess, CommandLine, ParentProcessName
+| sort by TimeGenerated desc
+
+// === Scenario 2: Execution from suspicious directories ===
+// Binaries running from temp, downloads, or public user folders
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4688
+| where NewProcessName matches regex @"(?i)(\\Temp\\|\\tmp\\|\\Downloads\\|\\AppData\\Local\\|\\ProgramData\\|\\Users\\Public\\)"
+| extend ProcessName = tolower(tostring(split(NewProcessName, "\\")[-1]))
+| where ProcessName !in ("chrome.exe", "firefox.exe", "msedge.exe", "teams.exe", "slack.exe", "code.exe")
+| summarize Count = count(), Hosts = dcount(Computer), HostList = make_set(Computer, 10)
+    by ProcessName, NewProcessName, CommandLine
+| where Count < 5
+| sort by Count asc
+
+// === Scenario 3: Renamed system binaries (masquerading) ===
+// Process name doesn't match original filename from PE header
+Sysmon
+| where TimeGenerated > ago(24h)
+| where EventID == 1
+| extend ProcessName = tolower(tostring(split(Image, "\\")[-1]))
+| extend OriginalName = tolower(OriginalFileName)
+| where isnotempty(OriginalName) and ProcessName != OriginalName
+| where OriginalName in ("cmd.exe", "powershell.exe", "pwsh.exe", "rundll32.exe",
+    "regsvr32.exe", "mshta.exe", "certutil.exe", "wscript.exe", "cscript.exe")
+| project TimeGenerated, Computer, User, ProcessName, OriginalName, Image, CommandLine, Hashes
+| sort by TimeGenerated desc
+
+// === Scenario 4: LOLBins with suspicious command-line arguments ===
+// Living-off-the-land binaries used for download, decode, or proxy execution
+let LOLBins = dynamic(["certutil.exe", "bitsadmin.exe", "mshta.exe", "regsvr32.exe",
+    "rundll32.exe", "msiexec.exe", "wmic.exe", "cmstp.exe", "msbuild.exe", "installutil.exe"]);
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4688
+| extend ProcessName = tolower(tostring(split(NewProcessName, "\\")[-1]))
+| where ProcessName in (LOLBins)
+| where CommandLine has_any ("http", "ftp", "-decode", "-urlcache", "-encode",
+    "/s /n /u /i:", "scrobj.dll", "javascript:", "vbscript:", "mshta.exe vbscript:")
+| project TimeGenerated, Computer, Account, ProcessName, CommandLine, ParentProcessName
+| sort by TimeGenerated desc
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Enable Process Creation auditing (Event 4688) with command line
+// - Deploy Sysmon for richer telemetry (OriginalFileName, hashes)
+// - Baseline normal parent-child relationships per environment
+// - Whitelist known admin tools and deployment scripts
+// - Tune temp directory rule to exclude known installers
+//
+// FALSE POSITIVES:
+// - Software installers extracting to temp before running
+// - SCCM/Intune deployments using LOLBins legitimately
+// - Developers using MSBuild for compilations
+// - IT automation scripts using PowerShell from Office
+// - DLL registration during software installation
+// ============================================================

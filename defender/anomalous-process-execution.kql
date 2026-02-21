@@ -1,0 +1,134 @@
+// =============================================================================
+// Title:        Anomalous Process Execution
+// Description:  Detects unusual process execution patterns including suspicious
+//               parent-child relationships, temp directory execution, LOLBin abuse,
+//               and renamed system binaries.
+// MITRE ATT&CK: T1059 (Command and Scripting Interpreter),
+//               T1055 (Process Injection), T1036 (Masquerading),
+//               T1218 (System Binary Proxy Execution), T1204 (User Execution)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  DeviceProcessEvents, DeviceFileEvents, AlertEvidence
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: Unusual parent-child process relationships
+// Office apps, web servers, or WMI spawning scripting engines
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+// Office applications spawning scripting engines
+| where (InitiatingProcessFileName in~ ("WINWORD.EXE", "EXCEL.EXE",
+    "POWERPNT.EXE", "OUTLOOK.EXE", "ONENOTE.EXE")
+    and FileName in~ ("cmd.exe", "powershell.exe", "pwsh.exe",
+        "wscript.exe", "cscript.exe", "mshta.exe", "certutil.exe",
+        "bitsadmin.exe", "regsvr32.exe"))
+    // Web servers spawning shells
+    or (InitiatingProcessFileName in~ ("w3wp.exe", "sqlservr.exe",
+        "httpd.exe", "tomcat.exe", "java.exe")
+        and FileName in~ ("cmd.exe", "powershell.exe", "whoami.exe",
+            "net.exe", "net1.exe"))
+    // WMI provider spawning shells
+    or (InitiatingProcessFileName =~ "WmiPrvSE.exe"
+        and FileName in~ ("cmd.exe", "powershell.exe", "pwsh.exe"))
+| project Timestamp, DeviceName, AccountName,
+    InitiatingProcessFileName, InitiatingProcessCommandLine,
+    FileName, ProcessCommandLine
+| extend AlertSeverity = "High"
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Execution from temp/staging directories
+// Binaries running from Temp, Downloads, Public, or ProgramData
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where FolderPath matches regex @"(?i)(\\Temp\\|\\tmp\\|\\AppData\\Local\\Temp\\)"
+    or (FolderPath matches regex @"(?i)(\\Downloads\\|\\Desktop\\|\\Documents\\)"
+        and FileName matches regex @"(?i)\.(exe|dll|scr|bat|cmd|ps1|vbs)$")
+    or FolderPath matches regex @"(?i)\\Users\\Public\\"
+    or FolderPath matches regex @"(?i)\\ProgramData\\[^\\]+\\[^\\]+\.(exe|dll)$"
+// Exclude known legitimate temp executables
+| where not(FileName in~ ("DismHost.exe", "TiWorker.exe", "setup.exe",
+    "installer.exe", "msiexec.exe"))
+| project Timestamp, DeviceName, AccountName, FileName, FolderPath,
+    ProcessCommandLine, InitiatingProcessFileName,
+    SHA256, FileSize
+| extend AlertSeverity = "High"
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Living-off-the-Land Binary (LOLBin) abuse
+// Legitimate system binaries used with suspicious arguments
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where
+    // certutil downloading files
+    (FileName =~ "certutil.exe"
+        and ProcessCommandLine has_any ("-urlcache", "-split", "http", "ftp"))
+    // mshta executing remote content
+    or (FileName =~ "mshta.exe"
+        and ProcessCommandLine has_any ("http", "javascript", "vbscript"))
+    // regsvr32 executing remote scriptlets
+    or (FileName =~ "regsvr32.exe"
+        and ProcessCommandLine has_any ("scrobj", "http"))
+    // rundll32 executing JavaScript or unusual DLLs
+    or (FileName =~ "rundll32.exe"
+        and ProcessCommandLine has_any ("javascript", "mshtml",
+            "\\Temp\\", "\\Downloads\\", "http"))
+    // bitsadmin downloading files
+    or (FileName =~ "bitsadmin.exe"
+        and ProcessCommandLine has_any ("/transfer", "/addfile"))
+    // wmic process create or remote execution
+    or (FileName =~ "wmic.exe"
+        and ProcessCommandLine has_any ("process call create", "/node:"))
+| project Timestamp, DeviceName, AccountName, FileName,
+    ProcessCommandLine, InitiatingProcessFileName,
+    InitiatingProcessCommandLine, FolderPath
+| extend AlertSeverity = "High"
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 4: Renamed system binary execution (masquerading)
+// PE original filename doesn't match actual filename on disk
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where ProcessVersionInfoOriginalFileName in~ ("cmd.exe", "powershell.exe",
+    "pwsh.exe", "net.exe", "whoami.exe", "tasklist.exe",
+    "schtasks.exe", "reg.exe", "certutil.exe")
+// Actual filename on disk is different
+| where FileName !in~ ("cmd.exe", "powershell.exe", "pwsh.exe", "net.exe",
+    "whoami.exe", "tasklist.exe", "schtasks.exe", "reg.exe", "certutil.exe")
+| project Timestamp, DeviceName, AccountName,
+    OriginalName = ProcessVersionInfoOriginalFileName,
+    ActualFileName = FileName, FolderPath,
+    ProcessCommandLine, SHA256
+| extend AlertSeverity = "Critical"
+| sort by Timestamp desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Add org-specific legitimate temp-directory executables to exclusions
+// - Expand LOLBin list from LOLBAS project (https://lolbas-project.github.io)
+// - For parent-child rules, exclude legitimate automation (Ansible, Chef, SCCM)
+// - Add process hash comparison against known-good baselines
+// - Tune renamed binary detection: some installers legitimately rename utilities
+// - Consider joining with DeviceFileEvents for file origin context (downloaded vs local)
+// - Use AlertEvidence to correlate with existing Defender alerts
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - Software installers extracting and executing from %TEMP%
+// - Auto-update mechanisms (Chrome, Firefox, Zoom) running from AppData
+// - IT automation tools spawning cmd/powershell from services
+// - Developers running scripts from Desktop/Documents directories
+// - Legitimate certutil usage for certificate management (without -urlcache)
+// - SCCM/Intune deploying packages via bitsadmin
+// - Virtualization guest tools using renamed binaries
+// =============================================================================

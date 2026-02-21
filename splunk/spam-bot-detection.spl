@@ -1,0 +1,86 @@
+` ============================================================
+` Title: Spam Bot Detection
+` Description: Detects compromised accounts exhibiting spam bot behavior
+`              including mass email sending, unusual outbound volumes,
+`              rapid API calls, and anomalous sending patterns.
+` MITRE ATT&CK: T1566 (Phishing), T1071.003 (Application Layer Protocol: Mail)
+` Severity: High
+` Data Sources: Exchange Message Tracking, O365 Management Activity,
+`              SMTP Gateway Logs, Email Security Appliance
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Abnormal outbound email volume per user ===
+` Detects users sending significantly more emails than their baseline
+index=exchange sourcetype="MSExchange:messagetracking" EventId="SEND"
+| bin _time span=1h
+| stats count as emails_sent dc(Recipients) as unique_recipients by Sender, _time
+| eventstats avg(emails_sent) as avg_sent stdev(emails_sent) as stdev_sent by Sender
+| eval threshold=avg_sent + (3 * stdev_sent)
+| where emails_sent > threshold AND emails_sent > 50
+| eval anomaly_score=round((emails_sent - avg_sent) / stdev_sent, 2)
+| table _time, Sender, emails_sent, unique_recipients, avg_sent, threshold, anomaly_score
+| sort -anomaly_score
+
+` === Scenario 2: High volume of emails to external recipients ===
+` Flags accounts sending bulk email to external domains
+index=exchange sourcetype="MSExchange:messagetracking" EventId="SEND"
+| rex field=Recipients "(?<recipient_domain>@[\w\.\-]+)"
+| lookup internal_domains.csv domain AS recipient_domain OUTPUT is_internal
+| where is_internal!="true"
+| bin _time span=1h
+| stats count as external_emails dc(recipient_domain) as unique_domains dc(Recipients) as unique_recipients by Sender, _time
+| where external_emails > 100 OR unique_domains > 20
+| sort -external_emails
+
+` === Scenario 3: Rapid API-based email sending (programmatic abuse) ===
+` Detects accounts using Graph API or EWS to send email at bot-like rates
+index=o365 sourcetype="o365:management:activity" Operation="Send" Workload="Exchange"
+| bin _time span=5m
+| stats count as api_sends by UserId, ClientIP, UserAgent, _time
+| where api_sends > 30
+| search UserAgent IN ("*python*", "*curl*", "*axios*", "*PowerShell*", "*HttpClient*", "*bot*")
+| sort -api_sends
+
+` === Scenario 4: New sender pattern — first-time bulk sender ===
+` Identifies accounts that have never sent bulk email before
+index=exchange sourcetype="MSExchange:messagetracking" EventId="SEND"
+| bin _time span=1d
+| stats count as daily_sent by Sender, _time
+| where daily_sent > 50
+| eventstats earliest(_time) as first_bulk_date by Sender
+| where _time=first_bulk_date AND _time > relative_time(now(), "-7d")
+| table _time, Sender, daily_sent
+| sort -daily_sent
+
+` === Scenario 5: Emails with high bounce/NDR rate indicating spam ===
+` Detects accounts generating excessive bounce-backs
+index=exchange sourcetype="MSExchange:messagetracking" EventId IN ("FAIL", "DSN")
+| bin _time span=1h
+| stats count as bounces by Sender, _time
+| join type=left Sender [
+    search index=exchange sourcetype="MSExchange:messagetracking" EventId="SEND"
+    | bin _time span=1h
+    | stats count as total_sent by Sender, _time
+]
+| eval bounce_rate=round(bounces / total_sent * 100, 2)
+| where bounce_rate > 30 AND bounces > 20
+| table _time, Sender, total_sent, bounces, bounce_rate
+| sort -bounce_rate
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Baseline email volumes per user/department for at least 30 days
+` - Exclude marketing/communications accounts with known high volumes
+` - Adjust the 3-sigma threshold based on organizational norms
+` - Whitelist approved mass-mailing tools (Mailchimp relay, etc.)
+` - Create separate thresholds for executives vs general staff
+`
+` FALSE POSITIVES:
+` - Marketing teams running legitimate campaigns
+` - Auto-reply loops during out-of-office periods
+` - IT notifications and automated system alerts
+` - Mailing list owners sending announcements
+` - Calendar invitations to large distribution groups
+` ============================================================

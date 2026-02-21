@@ -1,0 +1,81 @@
+` ============================================================
+` Title: Anomalous Process Execution Detection
+` Description: Detects suspicious process execution patterns including
+`              unusual parent-child relationships, processes from temp
+`              directories, renamed binaries, and LOLBins abuse.
+` MITRE ATT&CK: T1059 (Command and Scripting Interpreter),
+`               T1055 (Process Injection), T1036 (Masquerading),
+`               T1218 (System Binary Proxy Execution)
+` Severity: High
+` Data Sources: Sysmon (EventCode 1), Windows Security (4688),
+`              EDR Process Telemetry, Carbon Black, CrowdStrike
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Suspicious parent-child process relationships ===
+` Detects uncommon parent-child combos like Word spawning PowerShell
+index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| eval parent_proc=lower(mvindex(split(ParentImage, "\\"), -1))
+| eval child_proc=lower(mvindex(split(Image, "\\"), -1))
+| search (parent_proc IN ("winword.exe","excel.exe","powerpnt.exe","outlook.exe","acrobat.exe") AND child_proc IN ("cmd.exe","powershell.exe","pwsh.exe","wscript.exe","cscript.exe","mshta.exe","certutil.exe","bitsadmin.exe","regsvr32.exe"))
+    OR (parent_proc="explorer.exe" AND child_proc IN ("mshta.exe","regsvr32.exe","rundll32.exe","msiexec.exe") AND NOT like(CommandLine, "%/i %"))
+| table _time, Computer, User, parent_proc, child_proc, CommandLine, ParentCommandLine
+| sort -_time
+
+` === Scenario 2: Process execution from suspicious directories ===
+` Flags binaries running from temp, downloads, or user-writable paths
+index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| where match(Image, "(?i)(\\\\Temp\\\\|\\\\tmp\\\\|\\\\Downloads\\\\|\\\\AppData\\\\Local\\\\|\\\\ProgramData\\\\|\\\\Users\\\\Public\\\\|\\\\Recycle)")
+| eval proc_name=lower(mvindex(split(Image, "\\"), -1))
+| where NOT match(proc_name, "^(chrome|firefox|edge|teams|slack|zoom|code)")
+| stats count by Computer, User, Image, proc_name, CommandLine, ParentImage
+| where count < 5
+| sort -_time
+
+` === Scenario 3: Renamed system binaries (masquerading) ===
+` Detects executables with known binary hashes but different filenames
+index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| eval proc_name=lower(mvindex(split(Image, "\\"), -1))
+| eval original_name=lower(OriginalFileName)
+| where isnotnull(original_name) AND proc_name!=original_name AND original_name!=""
+| where original_name IN ("cmd.exe","powershell.exe","pwsh.exe","rundll32.exe","regsvr32.exe","mshta.exe","certutil.exe","wscript.exe","cscript.exe","net.exe","net1.exe","whoami.exe")
+| table _time, Computer, User, proc_name, original_name, Image, CommandLine, Hashes
+| sort -_time
+
+` === Scenario 4: LOLBins abuse — living off the land binaries ===
+` Monitors for suspicious use of legitimate system binaries
+index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| eval proc_name=lower(mvindex(split(Image, "\\"), -1))
+| where proc_name IN ("certutil.exe","bitsadmin.exe","mshta.exe","regsvr32.exe","rundll32.exe","msiexec.exe","wmic.exe","cmstp.exe","msconfig.exe","installutil.exe","regasm.exe","regsvcs.exe","odbcconf.exe","msbuild.exe")
+| search CommandLine IN ("*http*","*ftp*","*/i:http*","*-decode*","*-urlcache*","*-encode*","*/s /n /u /i:*","*scrobj.dll*","*javascript:*","*vbscript:*")
+| stats count values(CommandLine) as commands by Computer, User, proc_name, _time
+| sort -_time
+
+` === Scenario 5: Unsigned or rare executables in system paths ===
+` Identifies uncommon processes running from Windows system directories
+index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| where match(Image, "(?i)C:\\\\Windows\\\\(System32|SysWOW64)\\\\")
+| eval proc_name=lower(mvindex(split(Image, "\\"), -1))
+| rare proc_name limit=50
+| where count < 3
+| lookup known_system_binaries.csv process AS proc_name OUTPUT is_known
+| where is_known!="true"
+| table proc_name, count, Image
+| sort count
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Build baseline of known parent-child relationships in your env
+` - Maintain known_system_binaries.csv from clean Windows install
+` - Whitelist approved admin tools that run from temp directories
+` - Tune LOLBin detection by excluding known IT automation patterns
+` - Add Sysmon config to capture OriginalFileName for masquerading
+`
+` FALSE POSITIVES:
+` - Software installers running from Downloads or Temp directories
+` - IT management tools using LOLBins legitimately (SCCM, GPO scripts)
+` - Developers compiling with MSBuild or running diagnostic tools
+` - Auto-update mechanisms that extract to temp before installing
+` - Legitimate DLL registration during software installation
+` ============================================================

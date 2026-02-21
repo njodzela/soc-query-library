@@ -1,0 +1,155 @@
+/*
+ * Title:        Spam Bot Detection
+ * Description:  Detects compromised accounts being used as spam bots by identifying
+ *               abnormal outbound email volume, excessive unique recipients, rapid
+ *               API-based sends, and bounced email spikes.
+ * MITRE ATT&CK: T1566 (Phishing), T1071 (Application Layer Protocol), T1078 (Valid Accounts)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Email Events, Mail Gateway Logs, SMTP Relay Logs
+ */
+
+// =============================================================================
+// Scenario 1: High-volume outbound email from a single account
+// =============================================================================
+rule spam_bot_high_volume_outbound {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects compromised accounts sending abnormally high volumes of outbound email. Typical users send 50-100 emails/day — a compromised account may send thousands."
+    severity = "High"
+    mitre_attack = "T1078"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "OUTBOUND"
+    $email.principal.user.userid = $sender
+    $email.target.user.email_addresses = $recipient
+
+  match:
+    $sender over 1h
+
+  condition:
+    // More than 100 outbound emails in 1 hour is abnormal for most users
+    #email > 100
+
+  outcome:
+    $risk_score = 80
+    $email_count = #email
+    $unique_recipients = count_distinct($email.target.user.email_addresses)
+}
+
+// =============================================================================
+// Scenario 2: Many unique external recipients (spam distribution)
+// =============================================================================
+rule spam_bot_many_unique_recipients {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects accounts sending to an unusually high number of unique external recipients, characteristic of spam campaigns or phishing distribution."
+    severity = "High"
+    mitre_attack = "T1566"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "OUTBOUND"
+    $email.principal.user.userid = $sender
+    $email.target.user.email_addresses = $recipient
+
+    // External recipients only
+    not re.regex($email.target.user.email_addresses, `(?i)@(corp\.example\.com|example\.com)$`)
+
+  match:
+    $sender over 4h
+
+  condition:
+    count_distinct($email.target.user.email_addresses) > 50
+
+  outcome:
+    $risk_score = 85
+    $unique_recipients = count_distinct($email.target.user.email_addresses)
+    $total_emails = #email
+}
+
+// =============================================================================
+// Scenario 3: Rapid API/SMTP relay sends (machine-speed sending)
+// =============================================================================
+rule spam_bot_rapid_api_sends {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects rapid email sends via API/SMTP relay, indicating automated bot activity. Legitimate users cannot manually send emails at machine speed."
+    severity = "Critical"
+    mitre_attack = "T1071"
+
+  events:
+    $send.metadata.event_type = "EMAIL_TRANSACTION"
+    $send.network.direction = "OUTBOUND"
+    $send.principal.user.userid = $sender
+
+    // Sent via API or SMTP relay (not webmail UI)
+    (re.regex($send.security_result.description, `(?i)(SMTP|API|relay|automated)`) or
+     re.regex($send.network.application_protocol, `(?i)SMTP`))
+
+  match:
+    $sender over 10m
+
+  condition:
+    // 50+ emails in 10 minutes via SMTP/API = bot behavior
+    #send > 50
+
+  outcome:
+    $risk_score = 90
+    $send_count = #send
+    $send_methods = array_distinct($send.network.application_protocol)
+}
+
+// =============================================================================
+// Scenario 4: Bounced/NDR email spike (sending to invalid addresses)
+// =============================================================================
+rule spam_bot_bounced_email_spike {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects spike in bounced/NDR emails for a user, indicating the account is sending to invalid addresses (purchased email lists or spray campaigns)."
+    severity = "High"
+    mitre_attack = "T1078"
+
+  events:
+    $bounce.metadata.event_type = "EMAIL_TRANSACTION"
+    $bounce.principal.user.userid = $sender
+
+    // NDR / bounce indicators
+    (re.regex($bounce.security_result.description, `(?i)(bounce|NDR|undeliverable|rejected|5\.[0-9]\.[0-9])`) or
+     re.regex($bounce.metadata.product_event_type, `(?i)(bounce|NDR|delivery.failure)`))
+
+  match:
+    $sender over 1h
+
+  condition:
+    #bounce > 20
+
+  outcome:
+    $risk_score = 80
+    $bounce_count = #bounce
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Replace @corp.example.com with your actual corporate domains
+ * - Adjust the 100 emails/hour threshold based on roles (marketing/sales may send more)
+ * - Exclude known marketing platforms (Mailchimp, HubSpot) service accounts
+ * - Exclude distribution lists and shared mailboxes from volume alerts
+ * - Build per-user sending baselines and alert on deviations (2x normal = suspicious)
+ * - Correlate with authentication anomalies (new IP + high send volume = compromised)
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - Marketing teams sending campaigns via corporate email
+ * - Sales teams doing outreach to many external contacts
+ * - Automated notification systems (ticketing, alerts, newsletters)
+ * - HR bulk communications (benefits enrollment, policy updates)
+ * - Shared mailbox usage by multiple team members
+ * - Calendar invites to large distribution lists generating many SMTP transactions
+ */

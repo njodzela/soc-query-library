@@ -1,0 +1,93 @@
+// ============================================================
+// Title: Routine Threat Hunting Queries
+// Description: Proactive hunting queries for persistence mechanisms,
+//              unusual services, rare processes, and suspicious network
+//              activity. Designed for regular scheduled execution.
+// MITRE ATT&CK: T1053 (Scheduled Task/Job), T1547 (Boot/Logon Autostart),
+//               T1105 (Ingress Tool Transfer), T1543 (Create/Modify System Process)
+// Severity: Medium
+// Data Sources: SecurityEvent, Sysmon, DeviceNetworkEvents, DeviceFileEvents
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Scheduled tasks created in the last 24 hours ===
+// Hunts for new scheduled tasks that may indicate persistence
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4688
+| where NewProcessName endswith "schtasks.exe"
+| where CommandLine has "/create"
+| parse CommandLine with * "/tn " TaskName " " *
+| parse CommandLine with * "/tr " TaskCommand " " *
+| project TimeGenerated, Computer, Account, TaskName, TaskCommand, CommandLine
+| sort by TimeGenerated desc
+
+// === Scenario 2: New Windows services installed ===
+// Identifies newly installed services with suspicious characteristics
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 7045
+| extend ServiceRisk = case(
+    ServiceFileName matches regex @"(?i)(cmd|powershell|pwsh|wscript|cscript|mshta|\\temp\\|\\appdata\\)", "High",
+    ServiceFileName matches regex @"(?i)(programdata|users\\public)", "Medium",
+    "Low")
+| where ServiceRisk in ("High", "Medium")
+| project TimeGenerated, Computer, ServiceName, ServiceFileName, ServiceType, StartType, ServiceRisk
+| sort by TimeGenerated desc
+
+// === Scenario 3: Startup folder modifications ===
+// Detects files placed in startup directories
+Sysmon
+| where TimeGenerated > ago(24h)
+| where EventID == 11 // File create
+| where TargetFilename matches regex @"(?i)(Start Menu\\Programs\\Startup|\\Startup\\)"
+| project TimeGenerated, Computer, User, Image, TargetFilename
+| sort by TimeGenerated desc
+
+// === Scenario 4: Rare process execution — first seen analysis ===
+// Finds processes that appeared for the first time recently
+let Lookback = 30d;
+let RecentWindow = 24h;
+SecurityEvent
+| where TimeGenerated > ago(Lookback)
+| where EventID == 4688
+| extend ProcessName = tolower(tostring(split(NewProcessName, "\\")[-1]))
+| summarize FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated),
+    TotalCount = count(), HostCount = dcount(Computer) by ProcessName
+| where FirstSeen > ago(RecentWindow) and TotalCount < 5
+| sort by TotalCount asc
+
+// === Scenario 5: Unusual outbound connections by process ===
+// Hunts for processes making rare external network connections
+DeviceNetworkEvents
+| where TimeGenerated > ago(24h)
+| where ActionType == "ConnectionSuccess"
+| where RemoteIPType == "Public"
+| extend ProcessName = tolower(tostring(split(InitiatingProcessFileName, "\\")[-1]))
+| where ProcessName !in ("chrome.exe", "firefox.exe", "msedge.exe", "teams.exe",
+    "outlook.exe", "onedrive.exe", "svchost.exe", "microsoftedgeupdate.exe")
+| summarize
+    ConnectionCount = count(),
+    UniqueIPs = dcount(RemoteIP),
+    DestIPs = make_set(RemoteIP, 10),
+    HostCount = dcount(DeviceName)
+    by ProcessName, RemotePort
+| where HostCount < 3 and UniqueIPs < 5
+| sort by ConnectionCount asc
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Schedule these queries to run daily via Analytics Rules
+// - Build a 30-day baseline before tuning thresholds
+// - Maintain a whitelist of approved services and tasks
+// - Correlate rare processes with VirusTotal or threat intel
+// - Use Watchlists to manage known-good process baselines
+//
+// FALSE POSITIVES:
+// - Patch Tuesday deploying new services and binaries
+// - Admin scripts creating scheduled tasks via GPO
+// - Development tools in user directories
+// - Windows Update and telemetry processes
+// - Legitimate software auto-updaters
+// ============================================================

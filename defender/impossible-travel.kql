@@ -1,0 +1,136 @@
+// =============================================================================
+// Title:        Impossible Travel Detection
+// Description:  Detects successive logins from geographically distant locations
+//               within timeframes that make physical travel impossible, indicating
+//               credential compromise or account sharing.
+// MITRE ATT&CK: T1078 (Valid Accounts), T1078.004 (Cloud Accounts)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  IdentityLogonEvents, AADSignInEventsBeta, CloudAppEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: Successive logins from different countries within 2 hours
+// Correlates login pairs for same user from different geolocations
+// -----------------------------------------------------------------------------
+let TravelWindowHours = 2;
+let Login1 = IdentityLogonEvents
+    | where Timestamp > ago(4h)
+    | where ActionType == "LogonSuccess"
+    | project Login1Time = Timestamp, AccountUpn, IP1 = IPAddress,
+        Country1 = Location, DeviceName;
+let Login2 = IdentityLogonEvents
+    | where Timestamp > ago(4h)
+    | where ActionType == "LogonSuccess"
+    | project Login2Time = Timestamp, AccountUpn, IP2 = IPAddress,
+        Country2 = Location, DeviceName;
+Login1
+| join kind=inner Login2 on AccountUpn
+| where IP1 != IP2
+| where Country1 != Country2
+| where Login2Time > Login1Time
+| where datetime_diff('hour', Login2Time, Login1Time) <= TravelWindowHours
+| project AccountUpn, IP1, Country1, Login1Time, IP2, Country2, Login2Time,
+    TimeDiffMinutes = datetime_diff('minute', Login2Time, Login1Time)
+| sort by TimeDiffMinutes asc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: City-level impossible travel (same country, under 30 min)
+// Uses AADSignInEventsBeta for richer geolocation data
+// -----------------------------------------------------------------------------
+let CityWindowMinutes = 30;
+let Login1 = AADSignInEventsBeta
+    | where Timestamp > ago(2h)
+    | where ErrorCode == 0  // Successful login
+    | project Login1Time = Timestamp, AccountUpn, IP1 = IPAddress,
+        City1 = City, Country1 = Country;
+let Login2 = AADSignInEventsBeta
+    | where Timestamp > ago(2h)
+    | where ErrorCode == 0
+    | project Login2Time = Timestamp, AccountUpn, IP2 = IPAddress,
+        City2 = City, Country2 = Country;
+Login1
+| join kind=inner Login2 on AccountUpn
+| where IP1 != IP2
+| where City1 != City2
+| where Login2Time > Login1Time
+| where datetime_diff('minute', Login2Time, Login1Time) <= CityWindowMinutes
+| project AccountUpn, IP1, City1, Country1, Login1Time,
+    IP2, City2, Country2, Login2Time,
+    TimeDiffMinutes = datetime_diff('minute', Login2Time, Login1Time)
+| sort by TimeDiffMinutes asc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: VPN bypass — corporate login + near-simultaneous foreign login
+// Detects overlapping sessions from home country and foreign IP
+// -----------------------------------------------------------------------------
+let OverlapWindowMinutes = 5;
+let VpnLogins = IdentityLogonEvents
+    | where Timestamp > ago(2h)
+    | where ActionType == "LogonSuccess"
+    // Customize: your corporate home country
+    | where Location == "US"
+    | project VpnTime = Timestamp, AccountUpn, VpnIP = IPAddress,
+        HomeCountry = Location;
+let ForeignLogins = IdentityLogonEvents
+    | where Timestamp > ago(2h)
+    | where ActionType == "LogonSuccess"
+    | where Location != "US"
+    | project ForeignTime = Timestamp, AccountUpn, ForeignIP = IPAddress,
+        ForeignCountry = Location;
+VpnLogins
+| join kind=inner ForeignLogins on AccountUpn
+| where abs(datetime_diff('minute', ForeignTime, VpnTime)) <= OverlapWindowMinutes
+| extend AlertSeverity = "Critical"
+| project AccountUpn, VpnIP, HomeCountry, VpnTime,
+    ForeignIP, ForeignCountry, ForeignTime, AlertSeverity
+| sort by VpnTime desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 4: First-time login from a new country (anomaly detection)
+// Identifies users logging in from countries not seen in their 30-day history
+// -----------------------------------------------------------------------------
+let BaselineDays = 30;
+let BaselineCountries = IdentityLogonEvents
+    | where Timestamp between (ago(30d) .. ago(1d))
+    | where ActionType == "LogonSuccess"
+    | summarize KnownCountries = make_set(Location) by AccountUpn;
+IdentityLogonEvents
+| where Timestamp > ago(24h)
+| where ActionType == "LogonSuccess"
+| project Timestamp, AccountUpn, IPAddress, Location
+| join kind=leftanti BaselineCountries on AccountUpn
+// Users with NO baseline = all logins are "new"
+| union (
+    IdentityLogonEvents
+    | where Timestamp > ago(24h)
+    | where ActionType == "LogonSuccess"
+    | project Timestamp, AccountUpn, IPAddress, Location
+    | join kind=inner BaselineCountries on AccountUpn
+    | where not(KnownCountries has Location)
+)
+| project Timestamp, AccountUpn, IPAddress, NewCountry = Location
+| sort by Timestamp desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Replace "US" with your organization's home country in Scenario 3
+// - Exclude known VPN egress IPs and cloud proxy IPs (Zscaler, Netskope)
+// - For AADSignInEventsBeta, filter on specific AppDisplayName for critical apps
+// - Adjust the 2-hour country window based on organizational travel patterns
+// - Consider using risk score from Azure AD Identity Protection as additional signal
+// - Add exclusions for known traveler groups (executives, sales teams)
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - VPN split-tunneling causing dual geolocation
+// - Cloud proxy services routing traffic through global PoPs
+// - Mobile users on cellular networks with inaccurate geolocation
+// - Legitimate corporate travel with hotel/airport VPN
+// - Shared accounts accessed from multiple locations
+// - Dual SIM users with personal + business connectivity in different regions
+// =============================================================================

@@ -1,0 +1,118 @@
+// =============================================================================
+// Title:        Routine Threat Hunting Queries
+// Description:  Proactive hunting queries designed for scheduled execution
+//               (daily/weekly) to identify new scheduled tasks, services,
+//               startup modifications, rare processes, and unusual connections.
+// MITRE ATT&CK: T1053 (Scheduled Task/Job), T1547 (Boot/Logon Autostart),
+//               T1105 (Ingress Tool Transfer), T1543 (Create/Modify System Process),
+//               T1574 (Hijack Execution Flow)
+// Severity:     Medium
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  DeviceProcessEvents, DeviceFileEvents, DeviceNetworkEvents,
+//               DeviceRegistryEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: [HUNTING — Run Daily] New scheduled tasks created
+// Lists all schtasks /create and Register-ScheduledTask in past 24 hours
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where (FileName =~ "schtasks.exe" and ProcessCommandLine has "/create")
+    or ProcessCommandLine has "Register-ScheduledTask"
+| project Timestamp, DeviceName, AccountName, FileName,
+    ProcessCommandLine, InitiatingProcessFileName
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: [HUNTING — Run Daily] New services installed
+// Lists sc.exe create and New-Service commands in past 24 hours
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where (FileName =~ "sc.exe" and ProcessCommandLine has_cs "create")
+    or ProcessCommandLine has "New-Service"
+| project Timestamp, DeviceName, AccountName, FileName,
+    ProcessCommandLine, InitiatingProcessFileName
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: [HUNTING — Run Daily] Startup folder modifications
+// Detects files written to Windows Startup folders
+// -----------------------------------------------------------------------------
+DeviceFileEvents
+| where Timestamp > ago(24h)
+| where ActionType in ("FileCreated", "FileModified")
+| where FolderPath matches regex @"(?i)\\(Start Menu\\Programs\\Startup|Microsoft\\Windows\\Start Menu\\Programs\\Startup)\\"
+| project Timestamp, DeviceName, AccountName = InitiatingProcessAccountName,
+    FileName, FolderPath, InitiatingProcessFileName,
+    InitiatingProcessCommandLine, SHA256
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 4: [HUNTING — Run Weekly] Rarely-seen processes across fleet
+// Identifies process names executed on fewer than 3 devices in past 7 days
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(7d)
+// Exclude standard system paths
+| where FolderPath !startswith @"C:\Windows\System32"
+    and FolderPath !startswith @"C:\Windows\SysWOW64"
+    and FolderPath !startswith @"C:\Program Files"
+    and FolderPath !startswith @"C:\Program Files (x86)"
+| summarize
+    DeviceCount = dcount(DeviceName),
+    Devices = make_set(DeviceName, 10),
+    ExecutionCount = count(),
+    Users = make_set(AccountName, 10),
+    FirstSeen = min(Timestamp),
+    LastSeen = max(Timestamp)
+    by FileName, FolderPath
+| where DeviceCount < 3
+| sort by DeviceCount asc, ExecutionCount desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 5: [HUNTING — Run Daily] Unusual outbound connections
+// External IPs contacted by fewer than 3 internal devices
+// -----------------------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(24h)
+| where ActionType == "ConnectionSuccess"
+| where not(ipv4_is_private(RemoteIP))
+| where RemoteIP !startswith "127."
+| summarize
+    InternalDevices = dcount(DeviceName),
+    DeviceList = make_set(DeviceName, 10),
+    ConnectionCount = count(),
+    Ports = make_set(RemotePort, 10),
+    Processes = make_set(InitiatingProcessFileName, 10)
+    by RemoteIP
+| where InternalDevices < 3
+| where ConnectionCount > 5  // Filter out one-off connections
+| sort by ConnectionCount desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Hunting queries are for SCHEDULED execution, not real-time alerting
+// - Run daily queries every morning; weekly queries on Monday mornings
+// - For rare processes, build a baseline allow-list over first 2 weeks
+// - Adjust the "rare" threshold (dcount < 3) based on fleet size
+// - For unusual outbound connections, integrate with threat intel feeds
+// - Feed hunting results into case management for analyst triage
+// - Consider creating custom detection rules for persistent findings
+// - Build golden image baselines: separate server vs. workstation profiles
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - Developer machines running custom-compiled tools
+// - IT automation creating scheduled tasks and services (SCCM, Intune, GPO)
+// - Software deployment dropping files in Startup folders temporarily
+// - Legitimate admin tools (PsExec, ProcMon) on admin workstations
+// - VPN and security tools connecting to rare external IPs
+// - Portable applications running from non-standard paths
+// - Review in context: correlate multiple anomalies on same host/user
+// =============================================================================

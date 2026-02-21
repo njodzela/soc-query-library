@@ -1,0 +1,78 @@
+// ============================================================
+// Title: Forwarding Rule Abuse Detection
+// Description: Detects creation or modification of mailbox forwarding
+//              rules that could exfiltrate email to external addresses.
+// MITRE ATT&CK: T1114.003 (Email Forwarding Rule), T1114 (Email Collection)
+// Severity: High
+// Data Sources: OfficeActivity, AuditLogs, EmailEvents
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: New inbox rule forwarding to external address ===
+// Detects inbox rules created with forward/redirect actions
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where Operation in ("New-InboxRule", "Set-InboxRule")
+| extend ParsedParams = parse_json(Parameters)
+| mv-expand ParsedParams
+| where ParsedParams.Name in ("ForwardTo", "ForwardAsAttachmentTo", "RedirectTo")
+| extend ForwardTarget = tostring(ParsedParams.Value)
+| where ForwardTarget !endswith "yourdomain.com" and ForwardTarget !endswith "yourdomain.org"
+| project TimeGenerated, UserId, Operation, ForwardTarget, ClientIP, SessionId
+| sort by TimeGenerated desc
+
+// === Scenario 2: Exchange transport rule created or modified ===
+// Monitors for new transport rules that could silently copy or redirect mail
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where Operation in ("New-TransportRule", "Set-TransportRule", "Enable-TransportRule")
+| extend ParsedParams = parse_json(Parameters)
+| extend ParamString = tostring(ParsedParams)
+| where ParamString has_any ("BlindCopyTo", "RedirectMessageTo", "CopyTo", "ForwardTo")
+| project TimeGenerated, UserId, Operation, ParamString, ClientIP
+| sort by TimeGenerated desc
+
+// === Scenario 3: Forwarding configured via Set-Mailbox ===
+// Detects mailbox-level forwarding configured via PowerShell or admin portal
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where Operation == "Set-Mailbox"
+| extend ParsedParams = parse_json(Parameters)
+| mv-expand ParsedParams
+| where ParsedParams.Name in ("ForwardingSmtpAddress", "ForwardingAddress", "DeliverToMailboxAndForward")
+| extend ParamName = tostring(ParsedParams.Name), ParamValue = tostring(ParsedParams.Value)
+| where ParamValue != "" and ParamValue != "False"
+| project TimeGenerated, UserId, Operation, ParamName, ParamValue, ClientIP
+| sort by TimeGenerated desc
+
+// === Scenario 4: Bulk forwarding rule changes across multiple mailboxes ===
+// Flags when a single actor modifies forwarding on many mailboxes
+OfficeActivity
+| where TimeGenerated > ago(1h)
+| where Operation in ("New-InboxRule", "Set-InboxRule", "Set-Mailbox")
+| extend ParsedParams = parse_json(Parameters)
+| mv-expand ParsedParams
+| where ParsedParams.Name in ("ForwardTo", "ForwardAsAttachmentTo", "RedirectTo", "ForwardingSmtpAddress")
+| summarize
+    AffectedMailboxes = dcount(UserId),
+    MailboxList = make_set(UserId, 20),
+    RuleCount = count()
+    by ClientIP, bin(TimeGenerated, 1h)
+| where AffectedMailboxes > 3
+| sort by AffectedMailboxes desc
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Replace "yourdomain.com" with your actual internal domains
+// - Maintain a watchlist of approved external forwarding targets
+// - Exclude service accounts used for legitimate mail flow automation
+// - Consider alerting on any forwarding rule creation for VIP users
+// - Correlate with sign-in risk events for higher fidelity
+//
+// FALSE POSITIVES:
+// - IT admins configuring forwarding for departing employees
+// - Users setting up personal forwarding (may violate policy)
+// - Migration tools reconfiguring mailbox settings in bulk
+// - Legitimate shared mailbox management
+// ============================================================

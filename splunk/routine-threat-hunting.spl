@@ -1,0 +1,78 @@
+` ============================================================
+` Title: Routine Threat Hunting Queries
+` Description: Proactive hunting queries designed to run on a regular
+`              schedule to identify persistence mechanisms, unusual
+`              services, rare processes, and suspicious network activity.
+` MITRE ATT&CK: T1053 (Scheduled Task/Job), T1547 (Boot/Logon Autostart),
+`               T1105 (Ingress Tool Transfer), T1543 (Create/Modify System Process)
+` Severity: Medium
+` Data Sources: Sysmon, Windows Security Events, Windows System Events,
+`              Firewall/Proxy Logs, DNS Logs, EDR Telemetry
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: New scheduled tasks created in the last 24 hours ===
+` Hunts for recently created scheduled tasks that may indicate persistence
+index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| search Image="*schtasks.exe*" CommandLine="*/create*"
+| rex field=CommandLine "\/tn\s+[\"\']?(?<task_name>[^\"\'\/]+)"
+| rex field=CommandLine "\/tr\s+[\"\']?(?<task_command>[^\"\']+?)[\"\']?\s+\/"
+| stats count by Computer, User, task_name, task_command, _time
+| sort -_time
+
+` === Scenario 2: Startup folder modifications ===
+` Detects files written to startup directories for persistence
+index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=11
+| where match(TargetFilename, "(?i)(Start Menu\\\\Programs\\\\Startup|\\\\Startup\\\\)")
+| stats count by Computer, User, Image, TargetFilename, _time
+| sort -_time
+
+` === Scenario 3: New Windows services installed ===
+` Identifies newly installed services that may be malicious
+index=windows sourcetype="WinEventLog:System" EventCode=7045
+| eval service_risk=case(
+    match(ImagePath, "(?i)(cmd|powershell|pwsh|wscript|cscript|mshta|temp|appdata)"), "High",
+    match(ImagePath, "(?i)(programdata|users\\\\public)"), "Medium",
+    true(), "Low")
+| where service_risk IN ("High", "Medium")
+| table _time, Computer, ServiceName, ImagePath, ServiceType, StartType, service_risk
+| sort -_time
+
+` === Scenario 4: Rare process execution — first seen in environment ===
+` Finds processes that have never been seen before or are very rare
+index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| eval proc_name=lower(mvindex(split(Image, "\\"), -1))
+| stats earliest(_time) as first_seen latest(_time) as last_seen count dc(Computer) as host_count by proc_name
+| where first_seen > relative_time(now(), "-24h") AND count < 3
+| convert ctime(first_seen) ctime(last_seen)
+| table proc_name, first_seen, last_seen, count, host_count
+| sort count
+
+` === Scenario 5: Unusual outbound network connections ===
+` Hunts for processes making connections to rare external destinations
+index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=3
+| where NOT cidrmatch("10.0.0.0/8", DestinationIp) AND NOT cidrmatch("172.16.0.0/12", DestinationIp) AND NOT cidrmatch("192.168.0.0/16", DestinationIp)
+| eval proc_name=lower(mvindex(split(Image, "\\"), -1))
+| stats count dc(Computer) as host_count values(DestinationIp) as dest_ips dc(DestinationIp) as unique_dests by proc_name, DestinationPort
+| where host_count < 3 AND unique_dests < 5
+| where NOT proc_name IN ("chrome.exe","firefox.exe","msedge.exe","teams.exe","outlook.exe","onedrive.exe","svchost.exe")
+| sort count
+| head 50
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Run these queries daily or weekly as scheduled searches
+` - Build a baseline of normal services and processes over 30+ days
+` - Exclude known deployment tools from scheduled task detection
+` - Maintain a whitelist of approved third-party services
+` - Correlate findings with threat intelligence for known IOCs
+` - Use | outputlookup to track baselines over time
+`
+` FALSE POSITIVES:
+` - Software deployments installing new services (patch Tuesday)
+` - Legitimate admin scripts creating scheduled tasks via GPO
+` - Development tools creating startup entries during installation
+` - Cloud sync agents making outbound connections to new endpoints
+` - Windows Update and telemetry services
+` ============================================================

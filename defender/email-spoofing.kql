@@ -1,0 +1,127 @@
+// =============================================================================
+// Title:        Email Spoofing Detection
+// Description:  Detects email spoofing attacks including SPF/DKIM/DMARC failures,
+//               display name impersonation, lookalike domains, and Reply-To
+//               header mismatches.
+// MITRE ATT&CK: T1566.001 (Spearphishing Attachment),
+//               T1566.002 (Spearphishing Link), T1534 (Internal Spearphishing)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  EmailEvents, EmailUrlInfo, EmailAttachmentInfo, AlertEvidence
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: SPF/DKIM/DMARC authentication failures on inbound email
+// Detects emails failing email authentication checks
+// -----------------------------------------------------------------------------
+EmailEvents
+| where Timestamp > ago(24h)
+| where EmailDirection == "Inbound"
+| where AuthenticationDetails has_any ("spf=fail", "spf=softfail",
+    "dkim=fail", "dmarc=fail", "dmarc=none", "compauth=fail")
+| summarize
+    EmailCount = count(),
+    UniqueRecipients = dcount(RecipientEmailAddress),
+    RecipientList = make_set(RecipientEmailAddress, 20),
+    Subjects = make_set(Subject, 10),
+    AuthResults = make_set(AuthenticationDetails, 5)
+    by SenderFromAddress, SenderFromDomain = tostring(split(SenderFromAddress, "@")[1])
+| where EmailCount > 0
+| extend AlertSeverity = iff(EmailCount > 10, "High", "Medium")
+| project SenderFromAddress, SenderFromDomain, EmailCount, UniqueRecipients,
+    RecipientList, Subjects, AuthResults, AlertSeverity
+| sort by EmailCount desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Display name impersonation (CEO fraud / BEC)
+// Detects external emails with display names matching VIP/executives
+// -----------------------------------------------------------------------------
+// Customize: add your executive display names
+let VIPNames = dynamic(["CEO Name", "CFO Name", "CTO Name",
+    "Chief Executive", "Chief Financial Officer"]);
+EmailEvents
+| where Timestamp > ago(24h)
+| where EmailDirection == "Inbound"
+// External sender (not from corporate domain)
+| where SenderFromAddress !endswith "@corp.example.com"
+    and SenderFromAddress !endswith "@example.com"
+// Display name matches a VIP
+| where SenderDisplayName has_any (VIPNames)
+| project Timestamp, SenderDisplayName, SenderFromAddress,
+    RecipientEmailAddress, Subject, DeliveryAction,
+    AuthenticationDetails, NetworkMessageId
+| extend AlertSeverity = "Critical"
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Lookalike / typosquatting domain detection
+// Detects emails from domains visually similar to corporate domain
+// -----------------------------------------------------------------------------
+EmailEvents
+| where Timestamp > ago(24h)
+| where EmailDirection == "Inbound"
+| extend SenderDomain = tostring(split(SenderFromAddress, "@")[1])
+// Lookalike patterns — customize for your domain
+// Example: if your domain is "example.com", catch common typosquats
+| where SenderDomain matches regex @"(?i)(examp1e|exarnple|exampl3|exampIe|example\.co[^m]|example-corp|exmple|examplee)\."
+    or SenderDomain matches regex @"(?i)^.{1,3}xample\."
+    or SenderDomain matches regex @"(?i)^example.{1,3}\.(com|net|org)$"
+| summarize
+    EmailCount = count(),
+    Recipients = make_set(RecipientEmailAddress, 20),
+    Subjects = make_set(Subject, 10)
+    by SenderFromAddress, SenderDomain
+| extend AlertSeverity = "High"
+| project SenderFromAddress, SenderDomain, EmailCount, Recipients,
+    Subjects, AlertSeverity
+| sort by EmailCount desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 4: Reply-To header mismatch (different domain than From)
+// Detects emails where Reply-To domain differs from sender domain
+// -----------------------------------------------------------------------------
+EmailEvents
+| where Timestamp > ago(24h)
+| where EmailDirection == "Inbound"
+// External senders only
+| where SenderFromAddress !endswith "@corp.example.com"
+    and SenderFromAddress !endswith "@example.com"
+// Parse domains
+| extend FromDomain = tostring(split(SenderFromAddress, "@")[1])
+| extend ReplyToDomain = tostring(split(SenderReplyToAddress, "@")[1])
+// Reply-To exists and domain differs from From
+| where isnotempty(SenderReplyToAddress)
+| where FromDomain != ReplyToDomain
+| summarize
+    EmailCount = count(),
+    Subjects = make_set(Subject, 10),
+    Recipients = make_set(RecipientEmailAddress, 20)
+    by SenderFromAddress, FromDomain, SenderReplyToAddress, ReplyToDomain
+| extend AlertSeverity = "Medium"
+| project SenderFromAddress, FromDomain, SenderReplyToAddress, ReplyToDomain,
+    EmailCount, Subjects, Recipients, AlertSeverity
+| sort by EmailCount desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Replace VIPNames list with actual executive names from your organization
+// - Replace @corp.example.com / @example.com with your actual corporate domains
+// - Generate lookalike domain regex using dnstwist for your specific domain
+// - For auth failures, consider excluding known third-party senders (SaaS, marketing)
+// - SPF softfail may be legitimate for authorized third-party senders
+// - Correlate with EmailUrlInfo and EmailAttachmentInfo for higher-fidelity alerts
+// - Consider integrating with Safe Links / Safe Attachments verdicts
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - Third-party email services sending on behalf of your domain (Mailchimp, Salesforce)
+// - Partner organizations with legitimately similar domain names
+// - Newsletter services where Reply-To differs from From by design
+// - Newly onboarded SaaS tools not yet added to SPF/DKIM records
+// - Legitimate emails from free providers (Gmail, Outlook.com) with common names
+// - Auto-forwarded emails that break DKIM signatures in transit
+// =============================================================================

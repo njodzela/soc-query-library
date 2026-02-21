@@ -1,0 +1,169 @@
+/*
+ * Title:        Email Spoofing Detection
+ * Description:  Detects email spoofing attacks including SPF/DKIM/DMARC failures,
+ *               display name impersonation, lookalike domains, and Reply-To mismatches.
+ * MITRE ATT&CK: T1566.001 (Spearphishing Attachment), T1566.002 (Spearphishing Link),
+ *               T1534 (Internal Spearphishing)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Email Events, Mail Gateway Logs, DMARC Reports
+ */
+
+// =============================================================================
+// Scenario 1: SPF/DKIM/DMARC authentication failure
+// =============================================================================
+rule spoofing_spf_dkim_dmarc_failure {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects inbound emails that fail SPF, DKIM, or DMARC authentication checks. Spoofed emails typically fail at least one of these controls."
+    severity = "High"
+    mitre_attack = "T1566.001"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "INBOUND"
+    $email.principal.user.email_addresses = $sender
+    $email.target.user.email_addresses = $recipient
+
+    // Authentication failure indicators
+    (re.regex($email.security_result.description, `(?i)(spf=fail|spf=softfail|dkim=fail|dmarc=fail|dmarc=none)`) or
+     re.regex($email.security_result.category, `(?i)(AUTH_VIOLATION|POLICY_VIOLATION)`))
+
+  match:
+    $sender over 1h
+
+  condition:
+    #email > 0
+
+  outcome:
+    $risk_score = 75
+    $auth_results = array_distinct($email.security_result.description)
+    $recipients = array_distinct($email.target.user.email_addresses)
+    $email_count = #email
+}
+
+// =============================================================================
+// Scenario 2: Display name impersonation (CEO fraud / BEC)
+// =============================================================================
+rule spoofing_display_name_impersonation {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects emails where the display name matches a VIP/executive but the sending domain is external. Classic CEO fraud / BEC technique."
+    severity = "Critical"
+    mitre_attack = "T1534"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "INBOUND"
+    $email.principal.user.user_display_name = $display_name
+    $email.principal.user.email_addresses = $sender_email
+
+    // Display name matches known executives — customize this list
+    re.regex($email.principal.user.user_display_name, `(?i)(CEO Name|CFO Name|CTO Name|Chief Executive|Chief Financial)`)
+
+    // But email domain is NOT corporate
+    not re.regex($email.principal.user.email_addresses, `(?i)@(corp\.example\.com|example\.com)$`)
+
+  match:
+    $display_name over 24h
+
+  condition:
+    #email > 0
+
+  outcome:
+    $risk_score = 90
+    $spoofed_names = array_distinct($email.principal.user.user_display_name)
+    $actual_senders = array_distinct($email.principal.user.email_addresses)
+    $targets = array_distinct($email.target.user.email_addresses)
+}
+
+// =============================================================================
+// Scenario 3: Lookalike / typosquatting domain detection
+// =============================================================================
+rule spoofing_lookalike_domain {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects emails from domains that closely resemble your corporate domain using typosquatting, homoglyphs, or character substitution (e.g., examp1e.com, exampl3.com, exarnple.com)."
+    severity = "High"
+    mitre_attack = "T1566.002"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "INBOUND"
+    $email.principal.user.email_addresses = $sender
+
+    // Lookalike domain patterns — customize for your domain
+    (re.regex($email.principal.user.email_addresses, `(?i)@(examp1e|exarnple|exampl3|exampIe|example\.co[^m]|example-corp|exmple|examplee)\.`) or
+     // Generic homoglyph patterns — domains with mixed scripts
+     re.regex($email.principal.user.email_addresses, `(?i)@.*[0oO][1lI].*\.(com|net|org)$`))
+
+  match:
+    $sender over 24h
+
+  condition:
+    #email > 0
+
+  outcome:
+    $risk_score = 85
+    $sender_domains = array_distinct($email.principal.user.email_addresses)
+    $recipients = array_distinct($email.target.user.email_addresses)
+}
+
+// =============================================================================
+// Scenario 4: Reply-To address mismatch
+// =============================================================================
+rule spoofing_reply_to_mismatch {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects emails where the Reply-To address domain differs from the From address domain. Attackers set Reply-To to their controlled mailbox while spoofing the From header."
+    severity = "Medium"
+    mitre_attack = "T1566.002"
+
+  events:
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.network.direction = "INBOUND"
+    $email.principal.user.email_addresses = $from_addr
+    $email.network.email.reply_to = $reply_to
+
+    // Reply-To exists and differs from From domain
+    strings.length($email.network.email.reply_to) > 0
+
+    // External sender
+    not re.regex($email.principal.user.email_addresses, `(?i)@(corp\.example\.com|example\.com)$`)
+
+  match:
+    $from_addr over 24h
+
+  condition:
+    #email > 0
+
+  outcome:
+    $risk_score = 70
+    $from_addresses = array_distinct($email.principal.user.email_addresses)
+    $reply_to_addresses = array_distinct($email.network.email.reply_to)
+    $recipients = array_distinct($email.target.user.email_addresses)
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Replace executive names in display_name rule with actual org VIPs
+ * - Replace @corp.example.com with your actual corporate domains
+ * - Generate lookalike domain regex using tools like dnstwist for your specific domain
+ * - Consider integrating with DMARC aggregate reports for broader visibility
+ * - Exclude known third-party senders (marketing platforms, SaaS notifications)
+ * - SPF softfail may be legitimate for some third-party senders — tune accordingly
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - Third-party email services sending on behalf of your domain (Mailchimp, Salesforce)
+ * - Partner organizations with similar domain names
+ * - Newsletter services where Reply-To legitimately differs from From
+ * - Newly onboarded SaaS tools not yet added to SPF record
+ * - Legitimate emails from free email providers (Gmail, Outlook.com) with executive names
+ * - Auto-forwarded emails that break DKIM signatures
+ */

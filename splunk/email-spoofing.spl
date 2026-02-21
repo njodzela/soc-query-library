@@ -1,0 +1,80 @@
+` ============================================================
+` Title: Email Spoofing Detection
+` Description: Detects spoofed emails that bypass authentication controls
+`              including SPF/DKIM/DMARC failures, display name spoofing,
+`              header anomalies, and lookalike domain impersonation.
+` MITRE ATT&CK: T1566.001 (Spearphishing Attachment),
+`               T1566.002 (Spearphishing Link), T1036 (Masquerading)
+` Severity: High
+` Data Sources: Email Gateway Logs, O365 Message Trace, Exchange
+`              Message Tracking, DMARC Aggregate Reports
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Inbound emails failing SPF, DKIM, and DMARC ===
+` Detects emails that fail all three authentication mechanisms
+index=email sourcetype="email:gateway"
+| where dmarc_result="fail" OR (spf_result="fail" AND dkim_result="fail")
+| stats count as failed_emails dc(sender) as unique_senders values(sender) as senders by sender_domain, _time
+| where failed_emails > 5
+| sort -failed_emails
+
+` === Scenario 2: Display name spoofing of executives ===
+` Detects inbound emails using executive display names from external domains
+index=email sourcetype="email:gateway" direction="inbound"
+| lookup vip_users.csv display_name AS sender_display_name OUTPUT is_vip, expected_domain
+| where is_vip="true"
+| rex field=sender "(?<actual_domain>@[\w\.\-]+)"
+| where actual_domain!=expected_domain
+| table _time, sender_display_name, sender, actual_domain, expected_domain, subject, recipient
+| sort -_time
+
+` === Scenario 3: Lookalike domain detection ===
+` Identifies emails from domains that closely resemble legitimate company domains
+index=email sourcetype="email:gateway" direction="inbound"
+| rex field=sender "(?<sender_domain>@[\w\.\-]+)"
+| lookup internal_domains.csv domain AS sender_domain OUTPUT is_internal
+| where is_internal!="true"
+| eval domain_clean=replace(sender_domain, "@", "")
+| lookup lookalike_domains.csv lookalike AS domain_clean OUTPUT target_domain, similarity_score
+| where isnotnull(target_domain)
+| table _time, sender, sender_domain, target_domain, similarity_score, subject, recipient
+| sort -similarity_score
+
+` === Scenario 4: Reply-To mismatch detection ===
+` Flags emails where the Reply-To header differs from the From address domain
+index=email sourcetype="email:gateway" direction="inbound"
+| where isnotnull(reply_to)
+| rex field=sender "(?<from_domain>@[\w\.\-]+)"
+| rex field=reply_to "(?<reply_domain>@[\w\.\-]+)"
+| where from_domain!=reply_domain
+| stats count by sender, reply_to, from_domain, reply_domain, subject
+| where count > 2
+| sort -count
+
+` === Scenario 5: DMARC failures from domains impersonating partners ===
+` Monitors for DMARC-failing emails from known partner/vendor domains
+index=email sourcetype="email:gateway" direction="inbound" dmarc_result="fail"
+| rex field=sender "(?<sender_domain>@[\w\.\-]+)"
+| lookup partner_domains.csv domain AS sender_domain OUTPUT is_partner, partner_name
+| where is_partner="true"
+| stats count values(sender) as senders values(subject) as subjects by sender_domain, partner_name, _time
+| sort -count
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Maintain vip_users.csv with all C-suite and finance team names
+` - Build lookalike_domains.csv using tools like dnstwist for your domains
+` - Regularly update partner_domains.csv with vendor/partner domains
+` - Adjust thresholds based on daily email volume
+` - Consider integrating with threat intelligence feeds for known
+`   phishing domains
+`
+` FALSE POSITIVES:
+` - Legitimate third-party senders using forwarding services
+` - Marketing platforms sending on behalf of your domain (before SPF update)
+` - Newly onboarded partners without proper DMARC alignment
+` - Mailing lists that modify From headers
+` - Email forwarding chains that break DKIM signatures
+` ============================================================

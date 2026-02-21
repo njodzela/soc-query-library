@@ -1,0 +1,85 @@
+` ============================================================
+` Title: Impossible Travel Detection
+` Description: Detects user logins from geographically distant locations
+`              within timeframes that make physical travel impossible,
+`              indicating credential compromise or account sharing.
+` MITRE ATT&CK: T1078 (Valid Accounts), T1078.004 (Cloud Accounts)
+` Severity: High
+` Data Sources: O365 Sign-in Logs, VPN Authentication, Windows Security
+`              Event Log (4624), Cloud Authentication Logs
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Successive logins from different countries within 1 hour ===
+` Detects when a user authenticates from two different countries within 60 minutes
+index=o365 sourcetype="o365:management:activity" Operation="UserLoggedIn"
+| iplocation ClientIP
+| sort UserId, _time
+| streamstats current=f window=1 last(Country) as prev_country last(City) as prev_city last(_time) as prev_time last(ClientIP) as prev_ip by UserId
+| where isnotnull(prev_country) AND Country!=prev_country
+| eval time_diff_minutes=round((_time - prev_time) / 60, 1)
+| where time_diff_minutes < 60 AND time_diff_minutes > 0
+| eval travel_summary=prev_city.", ".prev_country." → ".City.", ".Country
+| table _time, UserId, travel_summary, time_diff_minutes, ClientIP, prev_ip
+| sort -_time
+
+` === Scenario 2: VPN logins from impossible locations ===
+` Checks VPN authentications for geographic impossibility using lat/lon distance
+index=vpn sourcetype="vpn:auth" action="success"
+| iplocation src_ip
+| sort user, _time
+| streamstats current=f window=1 last(lat) as prev_lat last(lon) as prev_lon last(_time) as prev_time last(src_ip) as prev_ip last(City) as prev_city by user
+| where isnotnull(prev_lat)
+| eval lat_diff=lat-prev_lat, lon_diff=lon-prev_lon
+| eval distance_km=round(6371*2*asin(sqrt(pow(sin((lat-prev_lat)*3.14159/360),2)+cos(prev_lat*3.14159/180)*cos(lat*3.14159/180)*pow(sin((lon-prev_lon)*3.14159/360),2))), 0)
+| eval time_diff_hours=round((_time - prev_time) / 3600, 2)
+| where time_diff_hours > 0
+| eval required_speed_kmh=round(distance_km / time_diff_hours, 0)
+| where required_speed_kmh > 900
+| table _time, user, prev_city, City, distance_km, time_diff_hours, required_speed_kmh, src_ip, prev_ip
+| sort -required_speed_kmh
+
+` === Scenario 3: Windows logon events with impossible travel ===
+` Monitors Windows domain logins from different source IPs with geo mismatch
+index=windows sourcetype="WinEventLog:Security" EventCode=4624 Logon_Type IN (2, 10)
+| iplocation src_ip
+| sort Account_Name, _time
+| streamstats current=f window=1 last(Country) as prev_country last(_time) as prev_time last(src_ip) as prev_ip by Account_Name
+| where isnotnull(prev_country) AND Country!=prev_country
+| eval time_diff_min=round((_time - prev_time) / 60, 1)
+| where time_diff_min < 120 AND time_diff_min > 0
+| stats count by Account_Name, prev_country, Country, time_diff_min, src_ip, prev_ip
+| sort -count
+
+` === Scenario 4: Cloud app logins with ASN and country mismatch ===
+` Flags when successive logins come from different ASNs in different countries
+index=o365 sourcetype="o365:management:activity" Operation="UserLoggedIn"
+| iplocation ClientIP
+| lookup asn_lookup.csv ip AS ClientIP OUTPUT asn, asn_org
+| sort UserId, _time
+| streamstats current=f window=1 last(Country) as prev_country last(asn_org) as prev_asn last(_time) as prev_time by UserId
+| where isnotnull(prev_country) AND Country!=prev_country AND asn_org!=prev_asn
+| eval time_diff_min=round((_time - prev_time) / 60, 1)
+| where time_diff_min < 120
+| table _time, UserId, prev_country, Country, prev_asn, asn_org, time_diff_min
+| sort -_time
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Exclude known VPN/proxy exit nodes that legitimately appear
+`   in multiple geolocations (corporate VPN pools)
+` - Whitelist users with known multi-location workflows (traveling
+`   executives with mobile hotspots + office VPN)
+` - Adjust speed threshold (900 km/h) — commercial flights peak
+`   around 900 km/h; lower to 500 for stricter detection
+` - Exclude IP pairs that belong to the same CDN or cloud provider
+` - Add | lookup trusted_vpn_ips.csv for corporate exit nodes
+`
+` FALSE POSITIVES:
+` - VPN split-tunneling showing corporate and home IPs simultaneously
+` - Cloud proxy services (Zscaler, Netskope) with distributed egress
+` - Mobile users on cellular networks with IP geolocation inaccuracies
+` - Shared accounts used by multiple people in different locations
+` - Geolocation database errors (IP to location mapping imprecision)
+` ============================================================
