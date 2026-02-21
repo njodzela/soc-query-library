@@ -1,0 +1,66 @@
+// ============================================================
+// Title: Command and Control Detection
+// Description: Detects C2 beaconing, DNS tunneling, and connections
+//              to threat intelligence IOCs.
+// MITRE ATT&CK: T1071.001, T1071.004, T1573, T1105
+// Severity: Critical
+// Data Sources: CommonSecurityLog, DnsEvents, ThreatIntelligenceIndicator
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: HTTP beaconing — regular interval connections ===
+CommonSecurityLog
+| where TimeGenerated > ago(4h)
+| where CommunicationDirection == "Outbound"
+| summarize RequestTimes = make_list(TimeGenerated, 500) by SourceIP, DestinationHostName
+| extend IntervalCount = array_length(RequestTimes)
+| where IntervalCount > 50
+| mv-apply ts = RequestTimes to typeof(datetime) on (
+    sort by ts asc
+    | extend diff = datetime_diff('second', ts, prev(ts))
+    | where isnotnull(diff)
+    | summarize AvgInterval = avg(diff), StdDevInterval = stdev(diff)
+)
+| where StdDevInterval < 5 and AvgInterval between (10 .. 600)
+| project SourceIP, DestinationHostName, IntervalCount, AvgInterval, StdDevInterval
+
+// === Scenario 2: DNS tunneling — high volume queries to single domain ===
+DnsEvents
+| where TimeGenerated > ago(1h)
+| extend DomainParts = split(Name, ".")
+| extend ParentDomain = strcat(DomainParts[-2], ".", DomainParts[-1])
+| where strlen(Name) > 50  // Abnormally long subdomain
+| summarize
+    QueryCount = count(),
+    UniqueSubdomains = dcount(Name),
+    AvgLength = avg(strlen(Name)),
+    TotalBytes = sum(strlen(Name))
+    by ClientIP, ParentDomain, bin(TimeGenerated, 15m)
+| where UniqueSubdomains > 100 and AvgLength > 40
+| sort by UniqueSubdomains desc
+
+// === Scenario 3: Matches against threat intel indicators ===
+ThreatIntelligenceIndicator
+| where Active == true and ExpirationDateTime > now()
+| where isnotempty(NetworkIP)
+| join kind=inner (
+    CommonSecurityLog
+    | where TimeGenerated > ago(24h)
+    | where CommunicationDirection == "Outbound"
+) on $left.NetworkIP == $right.DestinationIP
+| project TimeGenerated, SourceIP, DestinationIP, ThreatType, ConfidenceScore, Description
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Tune beaconing StdDev threshold (< 5s is strict, increase for noisy envs)
+// - Exclude known CDN and SaaS parent domains from DNS tunnel analysis
+// - Update threat intel feeds regularly via TAXII connector
+// - Whitelist heartbeat/health endpoints from beacon detection
+//
+// FALSE POSITIVES:
+// - Application health checks with regular intervals
+// - DNS-based load balancing with long queries
+// - Threat intel stale indicators (check ExpirationDateTime)
+// - Telemetry and analytics SDKs with periodic callbacks
+// ============================================================

@@ -1,0 +1,80 @@
+-- ============================================================
+-- Title: Brute-Force Login Detection
+-- Description: Detects multiple failed authentication attempts followed
+--              by success, password spraying, and distributed brute force.
+-- MITRE ATT&CK: T1110.001, T1110.003, T1110.004
+-- Severity: High
+-- Data Sources: Windows Authentication Events, Firewall Auth, VPN logs
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Single-source brute force ===
+-- >10 failed logins from one source IP within 10 minutes
+SELECT
+    sourceip,
+    username,
+    COUNT(*) AS failed_attempts,
+    MIN(starttime) AS first_attempt,
+    MAX(starttime) AS last_attempt
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Windows%Security%'
+    AND "EventID" = '4625'
+    AND starttime > NOW() - 10 * 60000  -- last 10 minutes
+GROUP BY sourceip, username
+HAVING COUNT(*) > 10
+ORDER BY failed_attempts DESC
+LAST 24 HOURS
+
+-- === Scenario 2: Password spraying detection ===
+-- One IP targeting many unique accounts
+SELECT
+    sourceip,
+    COUNT(DISTINCT username) AS unique_accounts,
+    COUNT(*) AS total_attempts
+FROM events
+WHERE "EventID" = '4625'
+    AND starttime > NOW() - 15 * 60000
+GROUP BY sourceip
+HAVING unique_accounts > 5 AND total_attempts > 20
+ORDER BY unique_accounts DESC
+LAST 24 HOURS
+
+-- === Scenario 3: Failed then success correlation ===
+-- Brute force followed by successful login from same IP
+SELECT
+    e1.sourceip,
+    e1.username,
+    e1.failed_count,
+    e2.success_time
+FROM (
+    SELECT sourceip, username, COUNT(*) AS failed_count
+    FROM events
+    WHERE "EventID" = '4625'
+        AND starttime > NOW() - 30 * 60000
+    GROUP BY sourceip, username
+    HAVING COUNT(*) > 10
+) AS e1
+INNER JOIN (
+    SELECT sourceip, username, starttime AS success_time
+    FROM events
+    WHERE "EventID" = '4624'
+        AND starttime > NOW() - 30 * 60000
+) AS e2
+ON e1.sourceip = e2.sourceip AND e1.username = e2.username
+ORDER BY e1.failed_count DESC
+LAST 24 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Exclude service accounts via: AND username NOT IN ('svc_backup', 'svc_monitor')
+-- - Whitelist trusted IPs: AND sourceip NOT IN ('10.0.0.1', '10.0.0.2')
+-- - Adjust threshold (>10) based on authentication baseline
+-- - Add LOGSOURCENAME filter for specific domains
+--
+-- FALSE POSITIVES:
+-- - Misconfigured service accounts with stale credentials
+-- - Users with expired passwords attempting SSO
+-- - VPN reconnection storms
+-- - Automated health checks with bad credentials
+-- ============================================================

@@ -1,0 +1,99 @@
+// =============================================================================
+// Title:        Data Exfiltration Detection
+// Description:  Detects data exfiltration via large outbound transfers,
+//               cloud storage uploads, and DNS tunneling indicators.
+// MITRE ATT&CK: T1048.001 (Exfil Over Symmetric Encrypted Non-C2),
+//               T1048.002 (Exfil Over Asymmetric Encrypted Non-C2),
+//               T1567 (Exfil to Cloud Storage), T1041 (Exfil Over C2)
+// Severity:     Critical
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  DeviceNetworkEvents, DeviceFileEvents, CloudAppEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: Large outbound data transfer to external IPs
+// Aggregates bytes sent per device and flags transfers exceeding 500 MB/hour
+// -----------------------------------------------------------------------------
+let ExfilThresholdBytes = 524288000; // 500 MB
+DeviceNetworkEvents
+| where Timestamp > ago(1h)
+| where ActionType == "ConnectionSuccess"
+// Exclude internal RFC1918 destinations
+| where not(ipv4_is_private(RemoteIP))
+| where RemotePort in (80, 443, 8080, 8443)
+| summarize
+    TotalBytesSent = sum(SentBytes),
+    UniqueDestinations = dcount(RemoteIP),
+    TopDestinations = make_set(RemoteIP, 10),
+    ConnectionCount = count()
+    by DeviceName, InitiatingProcessAccountName
+| where TotalBytesSent > ExfilThresholdBytes
+| extend TotalMB = round(toreal(TotalBytesSent) / 1048576, 2)
+| project DeviceName, InitiatingProcessAccountName, TotalMB,
+    UniqueDestinations, TopDestinations, ConnectionCount
+| sort by TotalMB desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Uploads to personal cloud storage services
+// Detects file uploads to Dropbox, personal OneDrive, Mega, etc.
+// -----------------------------------------------------------------------------
+CloudAppEvents
+| where Timestamp > ago(24h)
+| where ActionType in ("FileUploaded", "FileShared")
+| where Application in ("Dropbox", "Google Drive", "Box",
+    "WeTransfer", "Mega", "OneDrive (Personal)")
+| summarize
+    UploadCount = count(),
+    TotalBytes = sum(RawEventData.FileSize),
+    FileNames = make_set(RawEventData.FileName, 20),
+    UniqueFiles = dcount(RawEventData.FileName)
+    by AccountDisplayName, Application, AccountObjectId
+| where UploadCount > 5
+| project AccountDisplayName, Application, UploadCount, UniqueFiles,
+    FileNames, TotalBytes
+| sort by UploadCount desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Suspicious DNS query patterns (potential tunneling)
+// Flags hosts with high volumes of long DNS queries or TXT record lookups
+// -----------------------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(1h)
+| where ActionType == "DnsQueryResponse"
+// Long domain names suggest encoded data in subdomains
+| where strlen(RemoteUrl) > 50
+| summarize
+    QueryCount = count(),
+    UniqueDomains = dcount(RemoteUrl),
+    SampleDomains = make_set(RemoteUrl, 10)
+    by DeviceName
+| where QueryCount > 100
+| project DeviceName, QueryCount, UniqueDomains, SampleDomains
+| sort by QueryCount desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Adjust ExfilThresholdBytes (500 MB) based on normal business traffic.
+//   Dev teams and content creators may legitimately transfer large files.
+// - For Scenario 2, add sanctioned cloud apps to an exclusion list if your
+//   org uses them for business (e.g., corporately managed Dropbox).
+// - Scenario 3: Tune strlen threshold (50) and QueryCount (100) based on
+//   DNS baseline. Some CDNs use long hostnames.
+// - Correlate with DLP policy matches from Microsoft Purview for
+//   higher-confidence alerts.
+// - Consider adding sensitivity label checks for classified documents.
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - Software deployment and update downloads (reverse direction)
+// - Video conferencing generating high outbound traffic
+// - Cloud backup solutions uploading to sanctioned storage
+// - Marketing teams uploading content to social media platforms
+// - CDN push operations from web development teams
+// - DNS-based security products generating long TXT queries
+// - Mitigation: baseline per-device transfer volumes and alert on anomalies
+// =============================================================================

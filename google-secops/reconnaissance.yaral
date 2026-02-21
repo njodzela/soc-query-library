@@ -1,0 +1,136 @@
+/*
+ * Title:        Reconnaissance Detection
+ * Description:  Detects reconnaissance activities including port scanning,
+ *               vulnerability scanning, and network enumeration.
+ * MITRE ATT&CK: T1595 (Active Scanning), T1592 (Gather Victim Host Information), T1589 (Gather Victim Identity Info), T1590 (Gather Victim Network Info)
+ * Severity:     Medium
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Network Events, Firewall Logs, DNS Logs, IDS/IPS Alerts
+ */
+
+// =============================================================================
+// Scenario 1: Port scanning — single source hitting many ports on a target
+// =============================================================================
+rule recon_port_scan {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects port scanning activity from a single source to many ports on one or more targets."
+    severity = "Medium"
+    mitre_attack = "T1595"
+
+  events:
+    $scan.metadata.event_type = "NETWORK_CONNECTION"
+    $scan.principal.ip = $src_ip
+    $scan.target.ip = $dst_ip
+    $scan.target.port = $port
+
+    // Short-lived connections (SYN scan indicators)
+    $scan.network.sent_bytes < 200
+
+  match:
+    $src_ip over 10m
+
+  condition:
+    // 50+ distinct ports from a single source
+    count_distinct($scan.target.port) > 50
+
+  outcome:
+    $risk_score = 65
+    $unique_ports = count_distinct($scan.target.port)
+    $targets = array_distinct($scan.target.ip)
+    $connection_count = #scan
+}
+
+// =============================================================================
+// Scenario 2: Network sweep — single source contacting many internal hosts
+// =============================================================================
+rule recon_network_sweep {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects horizontal network sweeps across internal subnets."
+    severity = "Medium"
+    mitre_attack = "T1590"
+
+  events:
+    $sweep.metadata.event_type = "NETWORK_CONNECTION"
+    $sweep.principal.ip = $src_ip
+    $sweep.target.ip = $dst_ip
+
+    // Internal source
+    net.ip_in_range_cidr($sweep.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($sweep.principal.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($sweep.principal.ip, "192.168.0.0/16")
+
+    // Common recon ports
+    ($sweep.target.port = 22 or $sweep.target.port = 80 or
+     $sweep.target.port = 443 or $sweep.target.port = 445 or
+     $sweep.target.port = 3389 or $sweep.target.port = 135)
+
+  match:
+    $src_ip over 15m
+
+  condition:
+    count_distinct($sweep.target.ip) > 30
+
+  outcome:
+    $risk_score = 70
+    $unique_hosts = count_distinct($sweep.target.ip)
+    $ports_used = array_distinct($sweep.target.port)
+}
+
+// =============================================================================
+// Scenario 3: LDAP/AD enumeration queries
+// =============================================================================
+rule recon_ad_enumeration {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects Active Directory enumeration via excessive LDAP queries from non-DC hosts."
+    severity = "Medium"
+    mitre_attack = "T1589"
+
+  events:
+    $ldap.metadata.event_type = "NETWORK_CONNECTION"
+    $ldap.principal.ip = $src_ip
+    $ldap.target.port = 389
+    $ldap.principal.hostname = $host
+
+    // Source is NOT a domain controller
+    not re.regex($ldap.principal.hostname, `(?i)(DC|domaincontroller)`)
+
+  match:
+    $src_ip over 30m
+
+  condition:
+    #ldap > 100
+
+  outcome:
+    $risk_score = 70
+    $query_count = #ldap
+    $source_host = array_distinct($ldap.principal.hostname)
+    $target_dcs = array_distinct($ldap.target.ip)
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Scenario 1: Exclude known vulnerability scanners (Nessus, Qualys, Rapid7)
+ *   by source IP. Adjust port threshold based on environment.
+ * - Scenario 2: Tune the host count threshold (>30) — smaller networks may
+ *   need lower values, large /16 networks may need higher.
+ * - Scenario 3: Exclude known LDAP-heavy applications (SIEM agents, HR sync,
+ *   identity management tools). Add DC hostnames to the exclusion regex.
+ * - Consider correlating recon with subsequent exploitation for higher confidence.
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - Authorized vulnerability scanners during scheduled scan windows
+ * - Network monitoring tools (PRTG, Nagios, Zabbix) polling multiple hosts
+ * - SCCM/Intune inventory scans connecting to many endpoints
+ * - DNS/DHCP servers making connections to many internal hosts
+ * - Identity management tools performing LDAP sync operations
+ * - Mitigation: maintain scanner IP lists and scheduled scan windows
+ */

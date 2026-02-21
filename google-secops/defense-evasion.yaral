@@ -1,0 +1,138 @@
+/*
+ * Title:        Defense Evasion Detection
+ * Description:  Detects defense evasion via log clearing, security tool tampering,
+ *               masquerading, and obfuscated payloads.
+ * MITRE ATT&CK: T1070.001 (Clear Windows Event Logs), T1562.001 (Disable or Modify Tools), T1036.005 (Match Legitimate Name or Location), T1027 (Obfuscated Files or Information)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Process Events, Windows Security Logs (1102, 4688), Sysmon, EDR Telemetry
+ */
+
+// =============================================================================
+// Scenario 1: Windows event log clearing
+// =============================================================================
+rule evasion_log_clearing {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects clearing of Windows event logs via wevtutil or PowerShell."
+    severity = "Critical"
+    mitre_attack = "T1070.001"
+
+  events:
+    $clear.metadata.event_type = "PROCESS_LAUNCH"
+    $clear.principal.hostname = $host
+    $clear.principal.user.userid = $user
+
+    // wevtutil cl or Clear-EventLog
+    (re.regex($clear.target.process.command_line, `(?i)wevtutil\s+(cl|clear-log)`) or
+     re.regex($clear.target.process.command_line, `(?i)Clear-EventLog`) or
+     re.regex($clear.target.process.command_line, `(?i)Remove-EventLog`))
+
+  match:
+    $host over 1h
+
+  condition:
+    #clear > 0
+
+  outcome:
+    $risk_score = 90
+    $commands = array_distinct($clear.target.process.command_line)
+    $users = array_distinct($clear.principal.user.userid)
+}
+
+// =============================================================================
+// Scenario 2: Security tool/service tampering
+// =============================================================================
+rule evasion_disable_security_tools {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects attempts to stop or disable security tools and services."
+    severity = "Critical"
+    mitre_attack = "T1562.001"
+
+  events:
+    $tamper.metadata.event_type = "PROCESS_LAUNCH"
+    $tamper.principal.hostname = $host
+
+    // Stopping security services
+    (re.regex($tamper.target.process.command_line, `(?i)(net\s+stop|sc\s+stop|sc\s+config\s+.*start=\s*disabled)`) and
+     re.regex($tamper.target.process.command_line, `(?i)(WinDefend|MpsSvc|wscsvc|Sense|SepMasterService|ccSvcHst|McAfee|avp|bdagent|SAVService)`) )
+
+    or
+
+    // Disabling Windows Defender via PowerShell
+    re.regex($tamper.target.process.command_line, `(?i)Set-MpPreference\s+.*-Disable`)
+
+    or
+
+    // Unloading Sysmon driver
+    re.regex($tamper.target.process.command_line, `(?i)fltMC\.exe\s+(unload|detach)\s+SysmonDrv`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #tamper > 0
+
+  outcome:
+    $risk_score = 95
+    $commands = array_distinct($tamper.target.process.command_line)
+    $users = array_distinct($tamper.principal.user.userid)
+}
+
+// =============================================================================
+// Scenario 3: Process masquerading — executables in wrong locations
+// =============================================================================
+rule evasion_masquerading {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects executables masquerading as legitimate Windows binaries running from incorrect paths."
+    severity = "High"
+    mitre_attack = "T1036.005"
+
+  events:
+    $masq.metadata.event_type = "PROCESS_LAUNCH"
+    $masq.principal.hostname = $host
+
+    // Process name matches a system binary
+    re.regex($masq.target.process.file.full_path, `(?i)(svchost\.exe|csrss\.exe|lsass\.exe|services\.exe|smss\.exe|wininit\.exe|winlogon\.exe)$`)
+
+    // But NOT running from System32 or SysWOW64
+    not re.regex($masq.target.process.file.full_path, `(?i)(\\Windows\\System32\\|\\Windows\\SysWOW64\\)`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #masq > 0
+
+  outcome:
+    $risk_score = 90
+    $suspicious_paths = array_distinct($masq.target.process.file.full_path)
+    $parent_processes = array_distinct($masq.principal.process.file.full_path)
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Scenario 1: Ensure log clearing by legitimate admins during maintenance
+ *   windows is accounted for. Correlate with change tickets.
+ * - Scenario 2: Add your organization's specific security tool service names
+ *   to the regex pattern.
+ * - Scenario 3: Add legitimate paths if your org installs system utilities
+ *   in non-standard locations.
+ * - Enable Windows Defender Tamper Protection to prevent most Scenario 2 actions.
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - IT administrators clearing logs during scheduled maintenance
+ * - Endpoint management tools restarting AV services for updates
+ * - Software installers that temporarily stop services during upgrades
+ * - Virtualization tools that install helper binaries with system-like names
+ * - Windows servicing stack operations that move system binaries
+ * - Mitigation: correlate with user identity and change management systems
+ */

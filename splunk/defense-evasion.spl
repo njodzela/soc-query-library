@@ -1,0 +1,58 @@
+` ============================================================
+` Title: Defense Evasion Detection
+` Description: Identifies attempts to evade security controls including
+`              log clearing, disabling security tools, masquerading, and obfuscation.
+` MITRE ATT&CK: T1070.001 (Clear Windows Event Logs), T1562.001 (Disable Security Tools),
+`               T1036.005 (Match Legitimate Name or Location), T1027 (Obfuscated Files)
+` Severity: High
+` Data Sources: Windows Security (1102, 4688), Sysmon (1, 5), PowerShell logs,
+`              EDR telemetry
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Security log clearing ===
+` Detects clearing of Windows event logs — strong indicator of cover-up
+index=windows (sourcetype="WinEventLog:Security" EventCode=1102)
+    OR (sourcetype="WinEventLog:System" EventCode=104)
+| stats count values(Account_Name) as cleared_by by ComputerName, _time, sourcetype
+| sort -_time
+
+` === Scenario 2: Security tool tampering ===
+` Detects attempts to stop or disable security services
+index=windows sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| where (CommandLine LIKE "%Stop-Service%"
+    OR CommandLine LIKE "%net stop%"
+    OR CommandLine LIKE "%sc stop%"
+    OR CommandLine LIKE "%sc config%disabled%"
+    OR CommandLine LIKE "%Set-MpPreference%DisableRealtimeMonitoring%"
+    OR CommandLine LIKE "%Uninstall-WindowsFeature%")
+    AND (CommandLine LIKE "%Defender%" OR CommandLine LIKE "%Sense%"
+    OR CommandLine LIKE "%MpsSvc%" OR CommandLine LIKE "%WinDefend%"
+    OR CommandLine LIKE "%SecurityHealth%")
+| stats count values(CommandLine) as commands by User, ComputerName, ParentImage
+| sort -count
+
+` === Scenario 3: Process masquerading — svchost running from wrong path ===
+` Detects system binaries running from non-standard locations
+index=windows sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| where (Image LIKE "%svchost.exe" AND NOT Image LIKE "C:\\Windows\\System32\\svchost.exe")
+    OR (Image LIKE "%csrss.exe" AND NOT Image LIKE "C:\\Windows\\System32\\csrss.exe")
+    OR (Image LIKE "%lsass.exe" AND NOT Image LIKE "C:\\Windows\\System32\\lsass.exe")
+    OR (Image LIKE "%services.exe" AND NOT Image LIKE "C:\\Windows\\System32\\services.exe")
+| stats count values(Image) as suspicious_paths by User, ComputerName, ParentImage
+| sort -count
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Whitelist authorized log rotation/archival processes
+` - Allow IT-approved security tool maintenance windows
+` - Include all legitimate system binary paths per OS version
+` - Add hash-based validation for known-good system binaries
+`
+` FALSE POSITIVES:
+` - Authorized log rotation by SIEM collectors
+` - IT updating or reconfiguring security tools
+` - Sysinternals or diagnostic tools with similar names
+` - Windows Update temporarily stopping services
+` ============================================================

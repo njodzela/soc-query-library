@@ -1,0 +1,105 @@
+// =============================================================================
+// Title:        Reconnaissance Detection
+// Description:  Detects reconnaissance via port scanning, network enumeration,
+//               AD discovery commands, and vulnerability scanning indicators.
+// MITRE ATT&CK: T1595 (Active Scanning), T1592 (Gather Victim Host Info),
+//               T1589 (Gather Victim Identity Info), T1590 (Gather Victim Network Info)
+// Severity:     Medium
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  DeviceNetworkEvents, DeviceProcessEvents, IdentityDirectoryEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: Port scanning — single device connecting to many ports
+// Detects a host probing 50+ distinct ports on internal or external targets
+// -----------------------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(1h)
+| where ActionType in ("ConnectionSuccess", "ConnectionFailed",
+    "ConnectionAttempt")
+| summarize
+    UniquePorts = dcount(RemotePort),
+    UniqueIPs = dcount(RemoteIP),
+    ConnectionCount = count(),
+    PortList = make_set(RemotePort, 20),
+    TargetIPs = make_set(RemoteIP, 10)
+    by DeviceName, InitiatingProcessFileName
+| where UniquePorts > 50
+| project DeviceName, InitiatingProcessFileName, UniquePorts,
+    UniqueIPs, ConnectionCount, PortList, TargetIPs
+| extend AlertSeverity = iff(UniquePorts > 100, "High", "Medium")
+| sort by UniquePorts desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Internal discovery commands — net, nltest, dsquery, etc.
+// Detects execution of common AD/network enumeration commands
+// -----------------------------------------------------------------------------
+let ReconCommands = dynamic(["net group", "net user", "net localgroup",
+    "nltest /dclist", "nltest /domain_trusts", "dsquery",
+    "gpresult", "systeminfo", "ipconfig /all", "arp -a",
+    "nslookup", "whoami /all", "cmdkey /list",
+    "net share", "net view", "qwinsta",
+    "netstat -an", "tasklist /v", "wmic"]);
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where ProcessCommandLine has_any (ReconCommands)
+| summarize
+    CommandCount = count(),
+    UniqueCommands = dcount(ProcessCommandLine),
+    Commands = make_set(ProcessCommandLine, 20),
+    ExecutionTimes = make_set(Timestamp, 10)
+    by DeviceName, AccountName
+// Multiple distinct recon commands suggest deliberate enumeration
+| where UniqueCommands >= 3
+| project DeviceName, AccountName, UniqueCommands, CommandCount,
+    Commands
+| extend AlertSeverity = iff(UniqueCommands >= 5, "High", "Medium")
+| sort by UniqueCommands desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: LDAP enumeration from non-DC hosts
+// Detects excessive LDAP queries from workstations/servers
+// -----------------------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(1h)
+| where RemotePort in (389, 636, 3268, 3269)
+| where ActionType == "ConnectionSuccess"
+// Exclude known DCs and identity management servers
+// | where DeviceName !in ("DC01", "DC02", "AADConnect01")
+| summarize
+    LDAPConnections = count(),
+    TargetDCs = make_set(RemoteIP, 10),
+    UniqueTargets = dcount(RemoteIP)
+    by DeviceName, InitiatingProcessFileName,
+       InitiatingProcessAccountName
+| where LDAPConnections > 100
+| project DeviceName, InitiatingProcessFileName,
+    InitiatingProcessAccountName, LDAPConnections,
+    UniqueTargets, TargetDCs
+| sort by LDAPConnections desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Scenario 1: Exclude authorized vulnerability scanners (Nessus, Qualys)
+//   by DeviceName or InitiatingProcessFileName.
+// - Scenario 2: Adjust UniqueCommands threshold (>=3). Power users and
+//   sysadmins may legitimately run several of these.
+// - Scenario 3: Exclude domain controllers and identity servers. Add your
+//   DC hostnames to the exclusion filter.
+// - Correlate recon with subsequent exploitation for higher confidence.
+// - Consider time-of-day context: recon at unusual hours is more suspicious.
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - Authorized vulnerability scanners during scan windows
+// - IT administrators performing routine network diagnostics
+// - Monitoring tools (PRTG, Nagios) polling multiple hosts
+// - SCCM/Intune inventory scans
+// - Identity management tools (Azure AD Connect) querying LDAP
+// - Developers running ipconfig/systeminfo during troubleshooting
+// - Mitigation: maintain a list of scanner devices and IT admin accounts
+// =============================================================================

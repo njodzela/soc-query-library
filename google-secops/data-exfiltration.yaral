@@ -1,0 +1,147 @@
+/*
+ * Title:        Data Exfiltration Detection
+ * Description:  Detects data exfiltration via large outbound transfers, DNS tunneling,
+ *               and uploads to cloud storage services.
+ * MITRE ATT&CK: T1048.001 (Exfil Over Symmetric Encrypted Non-C2), T1048.002 (Exfil Over Asymmetric Encrypted Non-C2), T1567 (Exfil to Cloud Storage), T1041 (Exfil Over C2 Channel)
+ * Severity:     Critical
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Network Events, Proxy Logs, DNS Logs, DLP Alerts, Cloud Audit Logs
+ */
+
+// =============================================================================
+// Scenario 1: Large outbound data transfer to external IP
+// =============================================================================
+rule exfiltration_large_outbound {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects unusually large outbound data transfers to external destinations."
+    severity = "Critical"
+    mitre_attack = "T1048.001"
+
+  events:
+    $transfer.metadata.event_type = "NETWORK_CONNECTION"
+    $transfer.principal.ip = $src_ip
+    $transfer.target.ip = $dst_ip
+
+    // Outbound: source is internal
+    net.ip_in_range_cidr($transfer.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($transfer.principal.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($transfer.principal.ip, "192.168.0.0/16")
+
+    // Destination is external (not RFC1918)
+    not net.ip_in_range_cidr($transfer.target.ip, "10.0.0.0/8")
+    not net.ip_in_range_cidr($transfer.target.ip, "172.16.0.0/12")
+    not net.ip_in_range_cidr($transfer.target.ip, "192.168.0.0/16")
+
+    // Track bytes sent
+    $transfer.network.sent_bytes > 0
+
+  match:
+    $src_ip over 1h
+
+  condition:
+    // Aggregate bytes sent exceeds 500 MB in 1 hour
+    sum($transfer.network.sent_bytes) > 524288000
+
+  outcome:
+    $risk_score = 90
+    $total_bytes_sent = sum($transfer.network.sent_bytes)
+    $destinations = array_distinct($transfer.target.ip)
+}
+
+// =============================================================================
+// Scenario 2: DNS tunneling — high volume/long DNS queries
+// =============================================================================
+rule exfiltration_dns_tunneling {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects DNS tunneling by identifying high-entropy, long subdomain queries."
+    severity = "High"
+    mitre_attack = "T1048.001"
+
+  events:
+    $dns.metadata.event_type = "NETWORK_DNS"
+    $dns.network.dns.questions.name = $query_domain
+    $dns.principal.ip = $src_ip
+
+    // Long subdomain labels (>50 chars) suggest encoded data
+    strings.length($dns.network.dns.questions.name) > 50
+
+    // TXT or NULL record types commonly used for tunneling
+    ($dns.network.dns.questions.type = "TXT" or
+     $dns.network.dns.questions.type = "NULL" or
+     $dns.network.dns.questions.type = "CNAME")
+
+  match:
+    $src_ip over 30m
+
+  condition:
+    #dns > 100
+
+  outcome:
+    $risk_score = 85
+    $query_count = #dns
+    $sample_domains = array_distinct($dns.network.dns.questions.name)
+}
+
+// =============================================================================
+// Scenario 3: Uploads to personal cloud storage services
+// =============================================================================
+rule exfiltration_cloud_upload {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects uploads to personal cloud storage services (Dropbox, Google Drive, OneDrive personal, Mega)."
+    severity = "High"
+    mitre_attack = "T1567"
+
+  events:
+    $upload.metadata.event_type = "NETWORK_HTTP"
+    $upload.principal.ip = $src_ip
+
+    // Known personal cloud storage domains
+    (re.regex($upload.target.hostname, `(?i)(dropbox\.com|drive\.google\.com|onedrive\.live\.com|mega\.nz|wetransfer\.com|sendspace\.com)`) )
+
+    // HTTP POST or PUT (upload methods)
+    ($upload.network.http.method = "POST" or $upload.network.http.method = "PUT")
+
+    // Significant payload size
+    $upload.network.sent_bytes > 1048576  // >1 MB
+
+  match:
+    $src_ip over 1h
+
+  condition:
+    #upload > 3
+
+  outcome:
+    $risk_score = 80
+    $upload_count = #upload
+    $total_bytes = sum($upload.network.sent_bytes)
+    $services = array_distinct($upload.target.hostname)
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Scenario 1: Adjust the 500 MB threshold based on normal business patterns.
+ *   Backup servers, dev environments, and CDN origins may need exclusion.
+ * - Scenario 2: Tune DNS query length threshold (>50) and count (>100).
+ *   Some CDNs use long subdomains legitimately.
+ * - Scenario 3: Add sanctioned cloud storage domains to an exclusion list if
+ *   your org uses Dropbox/Drive for business.
+ * - Use reference lists for sanctioned external destinations.
+ * - Correlate with DLP alerts for higher-confidence detections.
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - Large legitimate file transfers (backups, software deployments, video uploads)
+ * - CDN traffic and software update downloads (reversed traffic direction)
+ * - DNS security products that generate long TXT queries
+ * - Sanctioned cloud storage usage for business purposes
+ * - Video conferencing and streaming generating high outbound bandwidth
+ * - Mitigation: baseline normal transfer volumes per host and alert on deviations
+ */

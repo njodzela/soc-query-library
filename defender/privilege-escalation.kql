@@ -1,0 +1,88 @@
+// =============================================================================
+// Title:        Privilege Escalation Detection
+// Description:  Detects privilege escalation via UAC bypass, token manipulation,
+//               exploitation, and privileged group modifications.
+// MITRE ATT&CK: T1068 (Exploitation for Privilege Escalation),
+//               T1548.002 (UAC Bypass), T1134 (Access Token Manipulation),
+//               T1078.002 (Domain Accounts)
+// Severity:     Critical
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  DeviceProcessEvents, IdentityDirectoryEvents, DeviceEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: UAC bypass via auto-elevating binaries
+// Detects known UAC bypass parent-child process relationships
+// -----------------------------------------------------------------------------
+let UACBypassParents = dynamic(["fodhelper.exe", "eventvwr.exe",
+    "computerdefaults.exe", "sdclt.exe", "cmstp.exe", "msconfig.exe"]);
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where InitiatingProcessFileName in~ (UACBypassParents)
+// Unexpected child process (not the normal GUI target)
+| where FileName !in~ ("mmc.exe", "control.exe")
+| project Timestamp, DeviceName, AccountName,
+    InitiatingProcessFileName, FileName,
+    ProcessCommandLine, FolderPath
+| extend AlertSeverity = "Critical"
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Addition to privileged AD groups
+// Detects user additions to Domain Admins, Enterprise Admins, etc.
+// -----------------------------------------------------------------------------
+let PrivilegedGroups = dynamic(["Domain Admins", "Enterprise Admins",
+    "Schema Admins", "Administrators", "Account Operators",
+    "Backup Operators", "DnsAdmins", "Server Operators"]);
+IdentityDirectoryEvents
+| where Timestamp > ago(24h)
+| where ActionType == "Group Membership changed"
+| where DestinationDeviceName != ""
+| extend GroupName = tostring(AdditionalFields.["TO.GROUP"])
+| extend TargetUser = tostring(AdditionalFields.["TARGET_OBJECT.USER"])
+| where GroupName has_any (PrivilegedGroups)
+| project Timestamp, AccountName, GroupName, TargetUser,
+    DestinationDeviceName, Application
+| extend AlertSeverity = "Critical"
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Exploitation indicators — privilege escalation via vulnerable drivers
+// Detects loading of known vulnerable drivers (BYOVD)
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+// Detect processes loading drivers from non-standard paths
+| where FileName in~ ("sc.exe")
+| where ProcessCommandLine has_all ("create", "type=", "kernel")
+| where ProcessCommandLine !has "System32\\drivers"
+| project Timestamp, DeviceName, AccountName, ProcessCommandLine,
+    InitiatingProcessFileName, FolderPath
+| extend AlertSeverity = "Critical"
+| sort by Timestamp desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Scenario 1: Update UACBypassParents list as new techniques emerge.
+//   Reference LOLBAS project for current bypass methods.
+// - Scenario 2: Add organization-specific privileged groups (custom admin groups).
+//   Exclude automated provisioning service accounts.
+// - Scenario 3: Maintain a list of known-vulnerable driver hashes from
+//   loldrivers.io for hash-based detection.
+// - Correlate with change management tickets for authorized group changes.
+// - Consider adding DeviceEvents | where ActionType == "ElevatedProcessCreated"
+//   for broader privilege escalation coverage.
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - IT admins performing authorized elevated operations
+// - Automated provisioning (SCIM/HR sync) modifying group membership
+// - Software installers requesting elevation via UAC
+// - Authorized kernel driver installations during patching
+// - Service accounts that legitimately load drivers
+// - Mitigation: correlate with ITSM tickets and change windows
+// =============================================================================

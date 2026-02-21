@@ -1,0 +1,75 @@
+-- ============================================================
+-- Title: Data Exfiltration Detection
+-- Description: Detects large outbound transfers, DNS tunneling,
+--              and uploads to cloud storage services.
+-- MITRE ATT&CK: T1048.001, T1048.002, T1567, T1041
+-- Severity: Critical
+-- Data Sources: Firewall logs, Proxy logs, DNS logs, Flow data
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Anomalous outbound data volume (flow-based) ===
+SELECT
+    sourceip,
+    SUM(sourcebytes) AS total_bytes_out,
+    COUNT(DISTINCT destinationip) AS unique_destinations,
+    SUM(sourcebytes) / 1048576 AS total_MB
+FROM flows
+WHERE direction = 'R2L' OR direction = 'L2R'
+    AND NOT INCIDR(destinationip, '10.0.0.0/8')
+    AND NOT INCIDR(destinationip, '172.16.0.0/12')
+    AND starttime > NOW() - 60 * 60000
+GROUP BY sourceip
+HAVING total_bytes_out > 500000000
+ORDER BY total_bytes_out DESC
+LAST 1 HOURS
+
+-- === Scenario 2: DNS tunneling — high subdomain entropy ===
+SELECT
+    sourceip,
+    "DNS_QueryName" AS query,
+    COUNT(*) AS query_count,
+    COUNT(DISTINCT "DNS_QueryName") AS unique_queries,
+    AVG(LENGTH("DNS_QueryName")) AS avg_query_length
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%DNS%'
+    AND LENGTH("DNS_QueryName") > 50
+    AND starttime > NOW() - 60 * 60000
+GROUP BY sourceip, "DNS_QueryName"
+HAVING query_count > 100 AND avg_query_length > 40
+ORDER BY query_count DESC
+LAST 1 HOURS
+
+-- === Scenario 3: Cloud storage uploads via proxy ===
+SELECT
+    sourceip,
+    username,
+    URL,
+    SUM(sourcebytes) AS bytes_uploaded,
+    COUNT(*) AS upload_count
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Proxy%'
+    AND (URL ILIKE '%dropbox.com/upload%'
+        OR URL ILIKE '%drive.google.com/upload%'
+        OR URL ILIKE '%onedrive.live.com%'
+        OR URL ILIKE '%mega.nz%')
+    AND "RequestMethod" = 'POST'
+GROUP BY sourceip, username, URL
+HAVING bytes_uploaded > 104857600
+ORDER BY bytes_uploaded DESC
+LAST 1 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Baseline normal outbound volumes per subnet/department
+-- - Add sanctioned cloud storage to reference set exclusions
+-- - Adjust 500MB threshold per environment
+-- - Correlate with DLP offense rules for higher confidence
+--
+-- FALSE POSITIVES:
+-- - Legitimate large file transfers (engineering, media)
+-- - Cloud backup/sync traffic
+-- - Video conferencing outbound streams
+-- - CDN and software update traffic
+-- ============================================================

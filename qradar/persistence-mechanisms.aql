@@ -1,0 +1,69 @@
+-- ============================================================
+-- Title: Persistence Mechanism Detection
+-- Description: Detects scheduled task creation, registry run keys,
+--              new service installations, and account creation.
+-- MITRE ATT&CK: T1053.005, T1547.001, T1136, T1543.003
+-- Severity: High
+-- Data Sources: Windows Security Events, Sysmon, System logs
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Suspicious scheduled task creation ===
+SELECT
+    username,
+    "ComputerName" AS host,
+    "TaskName" AS task_name,
+    "TaskContent" AS task_content,
+    starttime
+FROM events
+WHERE "EventID" = '4698'
+    AND ("TaskContent" ILIKE '%powershell%'
+        OR "TaskContent" ILIKE '%cmd.exe%'
+        OR "TaskContent" ILIKE '%wscript%'
+        OR "TaskContent" ILIKE '%\\AppData\\%'
+        OR "TaskContent" ILIKE '%\\Temp\\%')
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- === Scenario 2: New Windows service installed ===
+SELECT
+    "ComputerName" AS host,
+    "ServiceName" AS service_name,
+    "ServiceFileName" AS service_binary,
+    "ServiceType" AS service_type,
+    starttime
+FROM events
+WHERE "EventID" = '7045'
+    AND ("ServiceFileName" ILIKE '%\\Temp\\%'
+        OR "ServiceFileName" ILIKE '%\\AppData\\%'
+        OR "ServiceFileName" ILIKE '%cmd.exe%'
+        OR "ServiceFileName" ILIKE '%powershell%')
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- === Scenario 3: New local account creation ===
+SELECT
+    username AS creator,
+    "TargetUserName" AS new_account,
+    "ComputerName" AS host,
+    starttime
+FROM events
+WHERE "EventID" IN ('4720', '4722')
+    AND username NOT IN ('SYSTEM', 'sccm_svc', 'provisioning_svc')
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Whitelist known scheduled tasks in reference set
+-- - Exclude approved service installations (SCCM, Intune)
+-- - Filter provisioning system accounts from account creation
+-- - Monitor tasks from user-writable paths with higher severity
+--
+-- FALSE POSITIVES:
+-- - Software deployment creating scheduled tasks
+-- - Legitimate service installations during patching
+-- - IT helpdesk creating accounts per approved tickets
+-- - Windows Update tasks
+-- ============================================================

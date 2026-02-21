@@ -1,0 +1,76 @@
+-- ============================================================
+-- Title: Phishing Indicator Detection
+-- Description: Detects suspicious email attachments, newly registered
+--              domain clicks, and post-phishing credential use.
+-- MITRE ATT&CK: T1566.001, T1566.002, T1598
+-- Severity: High
+-- Data Sources: Email gateway logs, Proxy logs, DNS logs
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Emails with high-risk attachment types ===
+SELECT
+    "SenderAddress" AS sender,
+    "RecipientAddress" AS recipient,
+    "Subject" AS subject,
+    "AttachmentName" AS attachment,
+    starttime
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Mail%'
+    AND ("AttachmentName" ILIKE '%.exe'
+        OR "AttachmentName" ILIKE '%.scr'
+        OR "AttachmentName" ILIKE '%.js'
+        OR "AttachmentName" ILIKE '%.vbs'
+        OR "AttachmentName" ILIKE '%.hta'
+        OR "AttachmentName" ILIKE '%.iso'
+        OR "AttachmentName" ILIKE '%.lnk')
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- === Scenario 2: Clicks to newly registered or low-reputation domains ===
+SELECT
+    sourceip,
+    username,
+    URL,
+    destinationip,
+    COUNT(*) AS click_count
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Proxy%'
+    AND "RequestMethod" = 'GET'
+    AND REFERENCESETCONTAINS('newly_registered_domains', URL)
+GROUP BY sourceip, username, URL, destinationip
+ORDER BY click_count DESC
+LAST 24 HOURS
+
+-- === Scenario 3: Successful login from suspicious IP post-phishing ===
+SELECT
+    sourceip,
+    username,
+    "EventID",
+    starttime
+FROM events
+WHERE "EventID" = '4624'
+    AND sourceip IN (
+        SELECT DISTINCT destinationip
+        FROM events
+        WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%Proxy%'
+            AND REFERENCESETCONTAINS('phishing_urls', URL)
+            AND starttime > NOW() - 24 * 60 * 60000
+    )
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Maintain 'newly_registered_domains' reference set via threat intel
+-- - Update 'phishing_urls' from email gateway threat data
+-- - Exclude internal file-sharing domains from URL checks
+-- - Add sender domain reputation scoring if available
+--
+-- FALSE POSITIVES:
+-- - Legitimate new vendor domains
+-- - Partner organizations with young domains
+-- - Authorized executable attachments from IT
+-- - Phishing simulation platforms
+-- ============================================================

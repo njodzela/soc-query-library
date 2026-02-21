@@ -1,0 +1,70 @@
+-- ============================================================
+-- Title: Lateral Movement Detection
+-- Description: Detects anomalous RDP sessions, admin share access,
+--              and remote service execution patterns.
+-- MITRE ATT&CK: T1021.001, T1021.002, T1021.004, T1570
+-- Severity: High
+-- Data Sources: Windows Security Events, Network Flow, SMB logs
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: RDP to multiple internal hosts ===
+SELECT
+    sourceip,
+    username,
+    COUNT(DISTINCT destinationip) AS unique_targets,
+    COUNT(*) AS session_count
+FROM events
+WHERE "EventID" = '4624'
+    AND "LogonType" = '10'  -- RDP
+    AND INCIDR(sourceip, '10.0.0.0/8')
+GROUP BY sourceip, username
+HAVING unique_targets > 3
+ORDER BY unique_targets DESC
+LAST 24 HOURS
+
+-- === Scenario 2: Admin share access from non-admin workstation ===
+SELECT
+    sourceip,
+    username,
+    "ShareName" AS share_name,
+    COUNT(DISTINCT destinationip) AS hosts_accessed,
+    COUNT(*) AS access_count
+FROM events
+WHERE "EventID" = '5140'
+    AND ("ShareName" ILIKE '%ADMIN$%' OR "ShareName" ILIKE '%C$%')
+GROUP BY sourceip, username, "ShareName"
+HAVING hosts_accessed > 2
+ORDER BY hosts_accessed DESC
+LAST 12 HOURS
+
+-- === Scenario 3: Remote service creation (PsExec pattern) ===
+SELECT
+    sourceip,
+    "ComputerName" AS target_host,
+    "ServiceName" AS service_name,
+    "ServiceFileName" AS service_binary,
+    username,
+    starttime
+FROM events
+WHERE "EventID" = '7045'
+    AND ("ServiceName" ILIKE '%PSEXE%'
+        OR "ServiceFileName" ILIKE '%cmd.exe%'
+        OR "ServiceFileName" ILIKE '%powershell%')
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Maintain reference set of approved jump server IPs
+-- - Exclude IT admin accounts during change windows
+-- - Add reference set for authorized PsExec users
+-- - Adjust unique_targets threshold per network segment
+--
+-- FALSE POSITIVES:
+-- - IT administrators performing remote management
+-- - SCCM deploying software via admin shares
+-- - Authorized remote tools (BeyondTrust, CyberArk)
+-- - Backup agents accessing admin shares
+-- ============================================================

@@ -1,0 +1,136 @@
+/*
+ * Title:        Lateral Movement Detection
+ * Description:  Detects lateral movement techniques including RDP, SMB, WinRM,
+ *               and lateral tool transfer across internal network segments.
+ * MITRE ATT&CK: T1021.001 (RDP), T1021.002 (SMB/Windows Admin Shares), T1021.006 (WinRM), T1570 (Lateral Tool Transfer)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Network Events, Windows Security Logs (4624, 4648), EDR Process Events
+ */
+
+// =============================================================================
+// Scenario 1: Anomalous RDP connections between internal hosts
+// =============================================================================
+rule lateral_movement_rdp_internal {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects RDP connections between internal workstations, which is unusual in most environments."
+    severity = "High"
+    mitre_attack = "T1021.001"
+
+  events:
+    $rdp.metadata.event_type = "NETWORK_CONNECTION"
+    $rdp.target.port = 3389
+
+    // Source is internal
+    $rdp.principal.ip = $src_ip
+    net.ip_in_range_cidr($rdp.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($rdp.principal.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($rdp.principal.ip, "192.168.0.0/16")
+
+    // Destination is also internal
+    $rdp.target.ip = $dst_ip
+    net.ip_in_range_cidr($rdp.target.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($rdp.target.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($rdp.target.ip, "192.168.0.0/16")
+
+  match:
+    $src_ip over 1h
+
+  condition:
+    // Alert if a workstation connects to 3+ internal hosts via RDP
+    count_distinct($rdp.target.ip) >= 3
+
+  outcome:
+    $risk_score = 80
+    $destination_hosts = array_distinct($rdp.target.ip)
+    $unique_targets = count_distinct($rdp.target.ip)
+}
+
+// =============================================================================
+// Scenario 2: SMB/Admin share access to multiple hosts
+// =============================================================================
+rule lateral_movement_smb_sweep {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects a single host accessing SMB admin shares on multiple internal systems."
+    severity = "High"
+    mitre_attack = "T1021.002"
+
+  events:
+    $smb.metadata.event_type = "NETWORK_CONNECTION"
+    $smb.target.port = 445
+    $smb.principal.ip = $src_ip
+    $smb.target.ip = $dst_ip
+
+    // Look for admin share patterns in resource name
+    re.regex($smb.target.resource.name, `(?i)(ADMIN\$|C\$|IPC\$)`)
+
+  match:
+    $src_ip over 30m
+
+  condition:
+    count_distinct($smb.target.ip) >= 5
+
+  outcome:
+    $risk_score = 85
+    $targets_accessed = count_distinct($smb.target.ip)
+    $resources = array_distinct($smb.target.resource.name)
+}
+
+// =============================================================================
+// Scenario 3: WinRM lateral movement
+// =============================================================================
+rule lateral_movement_winrm {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects WinRM-based lateral movement via remote PowerShell sessions."
+    severity = "High"
+    mitre_attack = "T1021.006"
+
+  events:
+    // Network connections to WinRM ports
+    $winrm.metadata.event_type = "NETWORK_CONNECTION"
+    ($winrm.target.port = 5985 or $winrm.target.port = 5986)
+    $winrm.principal.ip = $src_ip
+    $winrm.target.ip = $dst_ip
+
+    // Internal to internal
+    net.ip_in_range_cidr($winrm.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($winrm.principal.ip, "172.16.0.0/12")
+
+  match:
+    $src_ip over 1h
+
+  condition:
+    count_distinct($winrm.target.ip) >= 3
+
+  outcome:
+    $risk_score = 80
+    $target_hosts = array_distinct($winrm.target.ip)
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Exclude known jump servers and bastion hosts from RDP detection by IP.
+ * - For SMB, exclude domain controllers and file servers that legitimately
+ *   receive many SMB connections.
+ * - Adjust the count_distinct thresholds based on environment size.
+ * - Add user context: correlate with $principal.user.userid to identify
+ *   compromised accounts.
+ * - Consider time-of-day filtering: lateral movement at 3 AM is more suspicious.
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - IT administrators using RDP for legitimate remote management
+ * - Vulnerability scanners performing authenticated scans via SMB
+ * - SCCM/MECM or other deployment tools accessing admin shares
+ * - Monitoring tools (e.g., SolarWinds, PRTG) polling via WMI/WinRM
+ * - Group Policy updates triggering SMB connections to DCs
+ * - Mitigation: maintain reference lists of admin workstations and IT tooling IPs
+ */

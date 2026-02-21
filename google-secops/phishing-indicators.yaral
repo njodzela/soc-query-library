@@ -1,0 +1,142 @@
+/*
+ * Title:        Phishing Indicators Detection
+ * Description:  Detects phishing attempts via suspicious email patterns, malicious URLs,
+ *               and post-delivery indicators of compromise.
+ * MITRE ATT&CK: T1566.001 (Spearphishing Attachment), T1566.002 (Spearphishing Link), T1598 (Phishing for Information)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Email Events, URL Reputation Feeds, Proxy Logs, EDR Process Events
+ */
+
+// =============================================================================
+// Scenario 1: Email with suspicious attachment followed by execution
+// =============================================================================
+rule phishing_attachment_execution {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects email delivery of suspicious attachment types followed by process execution."
+    severity = "Critical"
+    mitre_attack = "T1566.001"
+
+  events:
+    // Email with suspicious attachment
+    $email.metadata.event_type = "EMAIL_TRANSACTION"
+    $email.target.user.email_addresses = $recipient
+
+    // Suspicious file extensions
+    re.regex($email.about.file.full_path, `(?i)\.(exe|scr|js|vbs|hta|bat|cmd|ps1|lnk|iso|img)$`)
+
+    // Subsequent process launch on the recipient's host
+    $exec.metadata.event_type = "PROCESS_LAUNCH"
+    $exec.principal.user.email_addresses = $recipient
+
+    // Process launched from temp/download paths
+    re.regex($exec.target.process.file.full_path, `(?i)(\\Temp\\|\\Downloads\\|\\AppData\\Local\\Temp)`)
+
+    // Execution within 15 minutes of email
+    $email.metadata.event_timestamp.seconds < $exec.metadata.event_timestamp.seconds
+    $exec.metadata.event_timestamp.seconds - $email.metadata.event_timestamp.seconds < 900
+
+  match:
+    $recipient over 30m
+
+  condition:
+    #email > 0 and #exec > 0
+
+  outcome:
+    $risk_score = 95
+    $attachment_names = array_distinct($email.about.file.full_path)
+    $executed_processes = array_distinct($exec.target.process.file.full_path)
+}
+
+// =============================================================================
+// Scenario 2: Click on newly registered domain from email link
+// =============================================================================
+rule phishing_new_domain_click {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects user navigation to newly registered domains originating from email links."
+    severity = "High"
+    mitre_attack = "T1566.002"
+
+  events:
+    $click.metadata.event_type = "NETWORK_HTTP"
+    $click.principal.user.userid = $user
+    $click.target.hostname = $domain
+
+    // Domain age from enrichment — less than 30 days
+    $click.target.domain.creation_time.seconds > 0
+    timestamp.current_seconds() - $click.target.domain.creation_time.seconds < 2592000
+
+    // Referrer is a webmail or email client
+    re.regex($click.network.http.referral_url, `(?i)(mail\.google\.com|outlook\.office|webmail|zimbra)`)
+
+  match:
+    $user over 1h
+
+  condition:
+    #click > 0
+
+  outcome:
+    $risk_score = 80
+    $domains_visited = array_distinct($click.target.hostname)
+}
+
+// =============================================================================
+// Scenario 3: Credential harvesting — login form submission to suspicious domain
+// =============================================================================
+rule phishing_credential_harvest {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects POST requests with credential-like parameters to non-corporate domains."
+    severity = "High"
+    mitre_attack = "T1598"
+
+  events:
+    $post.metadata.event_type = "NETWORK_HTTP"
+    $post.network.http.method = "POST"
+    $post.principal.user.userid = $user
+    $post.target.hostname = $domain
+
+    // POST to non-corporate domain
+    not re.regex($post.target.hostname, `(?i)(\.corp\.example\.com|\.internal\.example\.com)$`)
+
+    // URL path suggests login/auth page
+    re.regex($post.network.http.parsed_user_agent, `(?i)(login|signin|auth|verify|account|secure|password)`)
+
+  match:
+    $user over 1h
+
+  condition:
+    #post > 0
+
+  outcome:
+    $risk_score = 85
+    $target_domains = array_distinct($post.target.hostname)
+    $submission_count = #post
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Scenario 1: Customize the file extension list based on what your email
+ *   gateway already blocks. Add .docm, .xlsm if macros are a concern.
+ * - Scenario 2: Adjust domain age threshold (30 days) — some orgs use 7 days.
+ *   Integrate with threat intel feeds for domain reputation.
+ * - Scenario 3: Replace `corp.example.com` with your actual corporate domains.
+ * - Add exclusions for sanctioned SaaS login pages.
+ * - Consider enrichment with VirusTotal, URLhaus, or PhishTank feeds.
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - Legitimate new vendor/partner domains that are recently registered
+ * - Marketing emails with tracking links through redirect services
+ * - IT-sanctioned security awareness phishing simulations (e.g., KnowBe4)
+ * - New SaaS application onboarding with login pages
+ * - URL shortener services that redirect to legitimate sites
+ * - Mitigation: maintain an allow-list of phishing simulation sender domains
+ */

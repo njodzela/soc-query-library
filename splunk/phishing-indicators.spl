@@ -1,0 +1,57 @@
+` ============================================================
+` Title: Phishing Indicator Detection
+` Description: Identifies phishing activity through suspicious email
+`              patterns, malicious link clicks, and attachment execution.
+` MITRE ATT&CK: T1566.001 (Spearphishing Attachment),
+`               T1566.002 (Spearphishing Link), T1598 (Phishing for Information)
+` Severity: High
+` Data Sources: Email gateway logs (O365, Proofpoint, Mimecast),
+`              Proxy logs, Endpoint (Sysmon)
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Emails with suspicious attachment types ===
+` Detects inbound emails carrying high-risk attachment extensions
+index=email sourcetype=email:gateway direction=inbound
+| where attachment_name LIKE "%.exe" OR attachment_name LIKE "%.scr"
+    OR attachment_name LIKE "%.js" OR attachment_name LIKE "%.vbs"
+    OR attachment_name LIKE "%.hta" OR attachment_name LIKE "%.iso"
+    OR attachment_name LIKE "%.img" OR attachment_name LIKE "%.lnk"
+| stats count values(attachment_name) as attachments values(subject) as subjects by sender, recipient
+| sort -count
+
+` === Scenario 2: User clicking links to newly registered domains ===
+` Correlates proxy logs with domain age to find clicks on fresh domains
+index=proxy sourcetype=proxy http_method=GET
+| rex field=url "https?://(?<domain>[^/]+)"
+| lookup domain_age_lookup.csv domain OUTPUT domain_age_days
+| where domain_age_days < 30 AND domain_age_days >= 0
+| stats count dc(src_ip) as unique_users values(src_ip) as users by domain, domain_age_days
+| where count > 1
+| sort domain_age_days
+
+` === Scenario 3: Office macro spawning suspicious child processes ===
+` Detects Word/Excel launching cmd, PowerShell, or other LOLBins
+index=windows sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| where (ParentImage LIKE "%WINWORD.EXE" OR ParentImage LIKE "%EXCEL.EXE"
+    OR ParentImage LIKE "%POWERPNT.EXE" OR ParentImage LIKE "%OUTLOOK.EXE")
+    AND (Image LIKE "%cmd.exe" OR Image LIKE "%powershell.exe"
+    OR Image LIKE "%wscript.exe" OR Image LIKE "%cscript.exe"
+    OR Image LIKE "%mshta.exe" OR Image LIKE "%certutil.exe")
+| stats count values(CommandLine) as commands by ParentImage, Image, User, ComputerName
+| sort -count
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Update attachment blocklist based on current threat intel
+` - Maintain domain_age_lookup via threat intel feed integration
+` - Whitelist approved macro-enabled documents by hash
+` - Adjust domain age threshold (30 days) based on threat landscape
+`
+` FALSE POSITIVES:
+` - Legitimate .iso files shared by partners
+` - New vendor domains for legitimate services
+` - Approved macro-enabled templates (finance, HR)
+` - Developer tools launching from Office during plugin development
+` ============================================================

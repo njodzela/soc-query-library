@@ -1,0 +1,102 @@
+// =============================================================================
+// Title:        Brute-Force Detection
+// Description:  Detects brute-force, password spraying, and credential stuffing
+//               attacks using identity and device logon events.
+// MITRE ATT&CK: T1110.001 (Password Guessing), T1110.003 (Password Spraying),
+//               T1110.004 (Credential Stuffing)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  IdentityLogonEvents, DeviceLogonEvents, AADSignInEventsBeta
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: Single-source brute force — many failed logins from one IP
+// Looks for 15+ failed logon attempts from a single IP within 10 minutes
+// -----------------------------------------------------------------------------
+let BruteForceThreshold = 15;
+let TimeWindow = 10m;
+IdentityLogonEvents
+| where Timestamp > ago(1h)
+| where ActionType == "LogonFailed"
+| summarize
+    FailedAttempts = count(),
+    TargetAccounts = make_set(AccountUpn),
+    UniqueAccounts = dcount(AccountUpn),
+    FirstAttempt = min(Timestamp),
+    LastAttempt = max(Timestamp)
+    by IPAddress
+| where FailedAttempts >= BruteForceThreshold
+    and datetime_diff('minute', LastAttempt, FirstAttempt) <= 10
+| extend AlertSeverity = iff(FailedAttempts > 50, "Critical", "High")
+| project IPAddress, FailedAttempts, UniqueAccounts, TargetAccounts,
+    FirstAttempt, LastAttempt, AlertSeverity
+| sort by FailedAttempts desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Password spraying — one IP targeting many distinct accounts
+// Detects attempts against 8+ unique accounts from a single source
+// -----------------------------------------------------------------------------
+let SprayThreshold = 8;
+IdentityLogonEvents
+| where Timestamp > ago(1h)
+| where ActionType == "LogonFailed"
+| summarize
+    FailedAttempts = count(),
+    UniqueTargets = dcount(AccountUpn),
+    TargetList = make_set(AccountUpn, 20),
+    Applications = make_set(Application)
+    by IPAddress
+| where UniqueTargets >= SprayThreshold
+// Spray pattern: many accounts but few attempts per account
+| extend AttemptsPerAccount = round(toreal(FailedAttempts) / UniqueTargets, 2)
+| where AttemptsPerAccount < 5
+| project IPAddress, FailedAttempts, UniqueTargets, AttemptsPerAccount,
+    TargetList, Applications
+| sort by UniqueTargets desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Credential stuffing — failed attempts followed by success
+// Correlates multiple failures with a subsequent successful logon
+// -----------------------------------------------------------------------------
+let LookbackWindow = 30m;
+let FailureThreshold = 10;
+let Failures = IdentityLogonEvents
+    | where Timestamp > ago(1h)
+    | where ActionType == "LogonFailed"
+    | summarize FailCount = count(), FailStart = min(Timestamp)
+        by IPAddress, AccountUpn;
+let Successes = IdentityLogonEvents
+    | where Timestamp > ago(1h)
+    | where ActionType == "LogonSuccess"
+    | project SuccessTime = Timestamp, IPAddress, AccountUpn, Application, DeviceName;
+Failures
+| where FailCount >= FailureThreshold
+| join kind=inner Successes on IPAddress
+| where SuccessTime > FailStart
+| where datetime_diff('minute', SuccessTime, FailStart) <= 30
+| project IPAddress, AccountUpn, FailCount, FailStart, SuccessTime,
+    Application, DeviceName
+| sort by FailCount desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Adjust BruteForceThreshold (15) based on organizational baseline.
+// - For cloud-only environments, use AADSignInEventsBeta for richer data.
+// - Exclude known load balancer and VPN egress IPs that aggregate users.
+// - Add | where IPAddress !in ("x.x.x.x", "y.y.y.y") for known-good IPs.
+// - Consider adding geographic enrichment: join with external geo-IP data.
+// - For hybrid environments, union IdentityLogonEvents with DeviceLogonEvents.
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - Shared NAT/VPN IPs where many users authenticate from the same address
+// - Automated monitoring tools that test authentication endpoints
+// - Password reset flows generating multiple failed attempts
+// - Service accounts with expired credentials retrying automatically
+// - Legacy apps without modern auth that retry with cached (stale) creds
+// - Mitigation: maintain a watchlist of known-good IPs for exclusion
+// =============================================================================

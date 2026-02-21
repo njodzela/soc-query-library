@@ -1,0 +1,54 @@
+` ============================================================
+` Title: Lateral Movement Detection
+` Description: Identifies suspicious lateral movement patterns including
+`              anomalous RDP sessions, PsExec usage, WMI remote execution,
+`              and SMB-based file transfers between internal hosts.
+` MITRE ATT&CK: T1021.001 (Remote Desktop Protocol), T1021.002 (SMB/Windows Admin Shares),
+`               T1021.003 (DCOM), T1047 (WMI), T1570 (Lateral Tool Transfer)
+` Severity: High
+` Data Sources: Windows Security (4624, 4648), Sysmon (Event 1, 3),
+`              Network flow data, SMB logs
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Anomalous RDP lateral movement ===
+` Detects RDP (type 10) logins between internal workstations (not from known jump servers)
+index=windows sourcetype="WinEventLog:Security" EventCode=4624 Logon_Type=10
+| where NOT cidrmatch("10.0.0.0/8", src_ip)=false
+| lookup known_jump_servers.csv ip as src_ip OUTPUT is_jump_server
+| where is_jump_server!="true"
+| stats count dc(dest) as unique_destinations values(dest) as destinations by src_ip, Account_Name
+| where unique_destinations > 3
+| sort -unique_destinations
+
+` === Scenario 2: PsExec / Remote service installation ===
+` Detects PsExec-style remote execution via service creation events
+index=windows sourcetype="WinEventLog:System" EventCode=7045
+| where Service_Name LIKE "%PSEXE%" OR Service_File_Name LIKE "%PSEXE%"
+    OR Service_File_Name LIKE "%\\\\ADMIN$%"
+    OR Service_File_Name LIKE "%cmd.exe /c%"
+| stats count values(Service_Name) as services values(Service_File_Name) as binaries by ComputerName, _time
+| sort -_time
+
+` === Scenario 3: WMI remote process creation ===
+` Detects WMI being used to spawn processes on remote systems
+index=windows sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| where ParentImage LIKE "%WmiPrvSE.exe%"
+| stats count values(CommandLine) as commands values(Image) as processes by ComputerName, User
+| where count > 2
+| sort -count
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Maintain a lookup of approved jump servers and admin workstations
+` - Baseline normal RDP patterns per user/role before alerting
+` - Exclude IT admin accounts during change windows
+` - Set unique_destinations threshold based on org size
+`
+` FALSE POSITIVES:
+` - IT administrators performing legitimate remote management
+` - SCCM/Intune pushing software via WMI
+` - Authorized PsExec usage by sysadmins
+` - RDP from legitimate remote admin tools
+` ============================================================

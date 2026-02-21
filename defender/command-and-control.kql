@@ -1,0 +1,106 @@
+// =============================================================================
+// Title:        Command and Control Detection
+// Description:  Detects C2 patterns including beaconing, DNS-based C2,
+//               encrypted traffic on non-standard ports, and tool download.
+// MITRE ATT&CK: T1071.001 (Web Protocols), T1071.004 (DNS),
+//               T1573 (Encrypted Channel), T1105 (Ingress Tool Transfer)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  DeviceNetworkEvents, DeviceProcessEvents, DeviceFileEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: HTTP/S beaconing — regular-interval callbacks to same domain
+// Detects high-frequency connections to a single external domain
+// -----------------------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(1h)
+| where ActionType == "ConnectionSuccess"
+| where RemotePort in (80, 443)
+| where not(ipv4_is_private(RemoteIP))
+| summarize
+    ConnectionCount = count(),
+    FirstSeen = min(Timestamp),
+    LastSeen = max(Timestamp),
+    BytesSent = sum(SentBytes),
+    BytesReceived = sum(ReceivedBytes)
+    by DeviceName, RemoteUrl, RemoteIP
+| where ConnectionCount > 60
+// Calculate average interval between connections
+| extend DurationMinutes = datetime_diff('minute', LastSeen, FirstSeen)
+| where DurationMinutes > 0
+| extend AvgIntervalSeconds = round(toreal(DurationMinutes * 60) / ConnectionCount, 1)
+// Regular intervals (low jitter) suggest automation
+| where AvgIntervalSeconds between (5 .. 300)
+| project DeviceName, RemoteUrl, RemoteIP, ConnectionCount,
+    AvgIntervalSeconds, BytesSent, BytesReceived, FirstSeen, LastSeen
+| sort by ConnectionCount desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Ingress tool transfer — download of executables via command-line
+// Detects certutil, PowerShell, bitsadmin downloading executables
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where FileName in~ ("certutil.exe", "powershell.exe", "bitsadmin.exe",
+    "curl.exe", "wget.exe")
+| where ProcessCommandLine has_any (".exe", ".dll", ".ps1", ".bat",
+    ".vbs", ".hta", "http://", "https://")
+| where ProcessCommandLine has_any ("urlcache", "downloadfile",
+    "Invoke-WebRequest", "iwr", "wget", "curl",
+    "Start-BitsTransfer", "DownloadString", "DownloadData")
+| project Timestamp, DeviceName, AccountName, FileName,
+    ProcessCommandLine, InitiatingProcessFileName
+| extend DownloadUrl = extract(@"(https?://[^\s""']+)", 1, ProcessCommandLine)
+| project Timestamp, DeviceName, AccountName, FileName,
+    ProcessCommandLine, DownloadUrl
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Encrypted traffic on non-standard ports
+// Flags TLS connections to external IPs on unusual ports
+// -----------------------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(1h)
+| where ActionType == "ConnectionSuccess"
+| where not(ipv4_is_private(RemoteIP))
+// Non-standard TLS ports
+| where RemotePort !in (443, 8443, 993, 995, 636, 389, 80)
+| where RemotePort > 1024
+// Look for processes that typically don't use non-standard ports
+| where InitiatingProcessFileName !in~ ("chrome.exe", "msedge.exe",
+    "firefox.exe", "Teams.exe", "outlook.exe")
+| summarize
+    ConnectionCount = count(),
+    UniquePorts = make_set(RemotePort),
+    UniqueIPs = make_set(RemoteIP, 10)
+    by DeviceName, InitiatingProcessFileName
+| where ConnectionCount > 5
+| project DeviceName, InitiatingProcessFileName, ConnectionCount,
+    UniquePorts, UniqueIPs
+| sort by ConnectionCount desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Scenario 1: Adjust the >60 connection threshold and interval range.
+//   Exclude known SaaS domains that make frequent API calls.
+// - Scenario 2: Add organization-approved download tools to exclusion.
+//   Some dev teams legitimately use curl/wget.
+// - Scenario 3: Add legitimate applications using non-standard TLS ports
+//   (VPN clients, custom business apps).
+// - Integrate with Microsoft Threat Intelligence for known C2 indicators.
+// - Consider JA3 fingerprint detection where available.
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - SaaS applications with frequent heartbeat connections (Teams, Slack)
+// - Software update services polling for updates
+// - Developers using curl/wget for legitimate downloads
+// - VPN and SD-WAN clients using non-standard ports
+// - Cloud monitoring agents sending telemetry
+// - Mitigation: baseline normal connection patterns per application
+// =============================================================================

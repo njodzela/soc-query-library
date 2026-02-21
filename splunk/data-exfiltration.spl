@@ -1,0 +1,59 @@
+` ============================================================
+` Title: Data Exfiltration Detection
+` Description: Detects potential data exfiltration via anomalous outbound
+`              data transfers, DNS tunneling, and cloud storage uploads.
+` MITRE ATT&CK: T1048.001 (Exfil Over Symmetric Encrypted Non-C2),
+`               T1048.002 (Exfil Over Asymmetric Encrypted Non-C2),
+`               T1567 (Exfil to Cloud Storage), T1041 (Exfil Over C2)
+` Severity: Critical
+` Data Sources: Proxy logs, Firewall logs, DNS logs, DLP, Cloud access logs
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Large outbound data transfer ===
+` Detects hosts sending unusually large volumes of data externally
+index=network sourcetype=firewall action=allowed direction=outbound
+| where NOT cidrmatch("10.0.0.0/8", dest_ip) AND NOT cidrmatch("172.16.0.0/12", dest_ip)
+| bin _time span=1h
+| stats sum(bytes_out) as total_bytes_out dc(dest_ip) as unique_destinations by src_ip, _time
+| where total_bytes_out > 500000000
+| eval total_MB=round(total_bytes_out/1048576, 2)
+| sort -total_bytes_out
+
+` === Scenario 2: DNS tunneling detection ===
+` Identifies abnormally long DNS queries or high query volume to single domain
+index=dns sourcetype=dns
+| eval query_length=len(query)
+| where query_length > 50
+| rex field=query "\.(?<parent_domain>[^\.]+\.[^\.]+)$"
+| stats count avg(query_length) as avg_len max(query_length) as max_len dc(query) as unique_queries by src_ip, parent_domain
+| where count > 100 AND avg_len > 40
+| sort -count
+
+` === Scenario 3: Bulk uploads to cloud storage services ===
+` Monitors for large or frequent uploads to cloud file-sharing platforms
+index=proxy sourcetype=proxy
+| where (url LIKE "%dropbox.com/upload%" OR url LIKE "%drive.google.com/upload%"
+    OR url LIKE "%onedrive.live.com%" OR url LIKE "%mega.nz%"
+    OR url LIKE "%wetransfer.com%")
+    AND http_method="POST"
+| bin _time span=1h
+| stats count sum(bytes_out) as total_uploaded by src_ip, user, url
+| where total_uploaded > 104857600
+| eval uploaded_MB=round(total_uploaded/1048576, 2)
+| sort -total_uploaded
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Baseline normal outbound transfer volumes per host/user
+` - Whitelist approved cloud storage domains if sanctioned
+` - Adjust byte thresholds for environment (500MB may be normal for devs)
+` - Correlate with DLP alerts for higher fidelity
+`
+` FALSE POSITIVES:
+` - Legitimate large file transfers (backups, dev builds)
+` - CDN or software update traffic
+` - Video conferencing and streaming
+` - Authorized use of cloud storage by approved teams
+` ============================================================

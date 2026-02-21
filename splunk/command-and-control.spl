@@ -1,0 +1,55 @@
+` ============================================================
+` Title: Command and Control (C2) Detection
+` Description: Detects C2 communication patterns including beaconing,
+`              DNS-based C2, and connections to known malicious infrastructure.
+` MITRE ATT&CK: T1071.001 (Web Protocols), T1071.004 (DNS),
+`               T1573 (Encrypted Channel), T1105 (Ingress Tool Transfer)
+` Severity: Critical
+` Data Sources: Proxy logs, DNS logs, Firewall/NetFlow, Threat intel feeds
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: HTTP/HTTPS beaconing detection ===
+` Identifies regular interval callbacks typical of C2 implants
+index=proxy sourcetype=proxy http_method=GET
+| bin _time span=1m
+| stats count by src_ip, dest, _time
+| streamstats current=f window=60 range(_time) as time_range stdev(count) as stdev_count avg(count) as avg_count by src_ip, dest
+| where stdev_count < 2 AND avg_count > 0 AND time_range > 3000
+| stats count avg(stdev_count) as beacon_regularity by src_ip, dest
+| where count > 30 AND beacon_regularity < 1.5
+| sort beacon_regularity
+
+` === Scenario 2: High-entropy DNS queries (DGA detection) ===
+` Detects domain generation algorithm patterns in DNS queries
+index=dns sourcetype=dns
+| rex field=query "^(?<subdomain>[^\.]+)\.(?<domain>[^\.]+\.[^\.]+)$"
+| eval domain_entropy=0
+| eval domain_len=len(subdomain)
+| where domain_len > 12
+| stats count dc(query) as unique_queries avg(domain_len) as avg_len by src_ip, domain
+| where unique_queries > 50 AND avg_len > 15
+| sort -unique_queries
+
+` === Scenario 3: Connections to known threat intel IOCs ===
+` Matches outbound connections against threat intelligence feeds
+index=network sourcetype=firewall action=allowed direction=outbound
+| lookup threat_intel_iocs.csv ip as dest_ip OUTPUT threat_category, confidence
+| where isnotnull(threat_category) AND confidence >= 80
+| stats count values(threat_category) as categories by src_ip, dest_ip, confidence
+| sort -confidence
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Update threat intel lookup daily from TAXII/STIX feeds
+` - Calibrate beaconing detection window to environment
+` - Whitelist known CDN and SaaS domains from beacon analysis
+` - Set entropy thresholds after baselining normal DNS traffic
+`
+` FALSE POSITIVES:
+` - Heartbeat/health-check traffic from legitimate applications
+` - NTP or telemetry with regular intervals
+` - CDN domains with high query volumes
+` - Antivirus signature update checks
+` ============================================================

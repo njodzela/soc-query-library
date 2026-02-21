@@ -1,0 +1,93 @@
+// =============================================================================
+// Title:        Persistence Mechanisms Detection
+// Description:  Detects persistence via scheduled tasks, registry Run keys,
+//               new account creation, and Windows service installation.
+// MITRE ATT&CK: T1053.005 (Scheduled Task), T1547.001 (Registry Run Keys),
+//               T1136 (Create Account), T1543.003 (Windows Service)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  DeviceProcessEvents, DeviceRegistryEvents, DeviceEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: Scheduled task creation by non-system users
+// Detects schtasks.exe /create or Register-ScheduledTask from user context
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where FileName =~ "schtasks.exe"
+| where ProcessCommandLine has "/create"
+// Exclude SYSTEM account
+| where AccountName !~ "SYSTEM"
+| project Timestamp, DeviceName, AccountName, ProcessCommandLine,
+    InitiatingProcessFileName, InitiatingProcessCommandLine
+| extend TaskName = extract(@"/tn\s+[""']?([^""'/]+)", 1, ProcessCommandLine)
+| extend TaskAction = extract(@"/tr\s+[""']?([^""']+)", 1, ProcessCommandLine)
+| project Timestamp, DeviceName, AccountName, TaskName, TaskAction,
+    ProcessCommandLine
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Registry Run key modifications
+// Monitors changes to HKLM/HKCU Run and RunOnce keys
+// -----------------------------------------------------------------------------
+DeviceRegistryEvents
+| where Timestamp > ago(24h)
+| where ActionType in ("RegistryValueSet", "RegistryKeyCreated")
+| where RegistryKey has_any (
+    @"CurrentVersion\Run",
+    @"CurrentVersion\RunOnce",
+    @"CurrentVersion\RunServices",
+    @"CurrentVersion\Explorer\Shell Folders",
+    @"CurrentVersion\Winlogon\Shell"
+)
+// Exclude known legitimate entries
+| where RegistryValueData !has_any ("SecurityHealth", "OneDrive",
+    "Teams", "Outlook")
+| project Timestamp, DeviceName, InitiatingProcessAccountName,
+    RegistryKey, RegistryValueName, RegistryValueData,
+    InitiatingProcessFileName, InitiatingProcessCommandLine
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: New Windows service creation from unusual binary paths
+// Detects service installation where the binary is outside standard locations
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where FileName =~ "sc.exe"
+| where ProcessCommandLine has "create"
+// Extract service binary path
+| extend ServiceBinPath = extract(@"binPath=\s*[""']?([^""']+)", 1, ProcessCommandLine)
+| where isnotempty(ServiceBinPath)
+// Flag services with binaries NOT in standard paths
+| where ServiceBinPath !has_any ("\\Windows\\System32",
+    "\\Program Files", "\\Program Files (x86)")
+| project Timestamp, DeviceName, AccountName, ProcessCommandLine,
+    ServiceBinPath
+| extend AlertSeverity = "High"
+| sort by Timestamp desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Scenario 1: Exclude known IT automation tools (SCCM, Intune, PDQ)
+//   by InitiatingProcessFileName or AccountName.
+// - Scenario 2: Add legitimate software Run key entries to the exclusion list.
+//   Inventory current Run keys to establish a baseline.
+// - Scenario 3: Add approved service binary paths for your org's software.
+// - Consider DeviceEvents | ActionType == "ServiceInstalled" as a complement.
+// - Deploy ASR rules to block persistence mechanisms at the endpoint.
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - Software installations registering Run keys or services
+// - Windows Update creating maintenance scheduled tasks
+// - IT management tools (SCCM, Intune) deploying configurations
+// - Antivirus/EDR agent installations creating services
+// - GPO-deployed logon scripts writing to Run keys
+// - Mitigation: baseline known services and tasks per device role
+// =============================================================================

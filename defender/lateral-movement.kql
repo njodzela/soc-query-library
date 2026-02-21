@@ -1,0 +1,100 @@
+// =============================================================================
+// Title:        Lateral Movement Detection
+// Description:  Detects lateral movement via RDP, SMB admin shares, WinRM,
+//               and remote service creation across internal hosts.
+// MITRE ATT&CK: T1021.001 (RDP), T1021.002 (SMB/Admin Shares),
+//               T1021.006 (WinRM), T1570 (Lateral Tool Transfer)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  DeviceNetworkEvents, DeviceLogonEvents, DeviceProcessEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: Anomalous RDP from workstation to multiple internal hosts
+// Identifies a single device initiating RDP to 3+ internal endpoints
+// -----------------------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(1h)
+| where RemotePort == 3389
+| where ActionType == "ConnectionSuccess"
+// Exclude known jump servers
+// | where DeviceName !in ("jumpserver01", "bastion01")
+| summarize
+    RDPTargets = make_set(RemoteIP),
+    UniqueTargets = dcount(RemoteIP),
+    ConnectionCount = count(),
+    FirstConnection = min(Timestamp),
+    LastConnection = max(Timestamp)
+    by DeviceName, InitiatingProcessAccountName
+| where UniqueTargets >= 3
+| extend AlertSeverity = iff(UniqueTargets >= 5, "Critical", "High")
+| project DeviceName, InitiatingProcessAccountName, UniqueTargets,
+    ConnectionCount, RDPTargets, FirstConnection, LastConnection, AlertSeverity
+| sort by UniqueTargets desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: SMB admin share access to multiple hosts
+// Detects one device accessing C$, ADMIN$, or IPC$ on multiple targets
+// -----------------------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(1h)
+| where RemotePort == 445
+| where ActionType == "ConnectionSuccess"
+| summarize
+    SMBTargets = make_set(RemoteIP),
+    UniqueTargets = dcount(RemoteIP),
+    TotalConnections = count()
+    by DeviceName, InitiatingProcessAccountName,
+       InitiatingProcessFileName
+| where UniqueTargets >= 5
+| project DeviceName, InitiatingProcessAccountName,
+    InitiatingProcessFileName, UniqueTargets, TotalConnections, SMBTargets
+| sort by UniqueTargets desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Remote process execution via WinRM / PSExec
+// Detects remote logon types followed by suspicious process launches
+// -----------------------------------------------------------------------------
+let RemoteLogons = DeviceLogonEvents
+    | where Timestamp > ago(1h)
+    | where LogonType in ("RemoteInteractive", "Network", "NetworkCleartext")
+    | where IsLocalAdmin == true
+    | project LogonTime = Timestamp, DeviceName, AccountName,
+        RemoteIP, LogonType;
+let SuspiciousProcesses = DeviceProcessEvents
+    | where Timestamp > ago(1h)
+    | where FileName in~ ("powershell.exe", "cmd.exe", "psexec.exe",
+        "wmic.exe", "mshta.exe", "certutil.exe")
+    | project ProcessTime = Timestamp, DeviceName, AccountName,
+        FileName, ProcessCommandLine;
+RemoteLogons
+| join kind=inner SuspiciousProcesses
+    on DeviceName, AccountName
+| where ProcessTime between (LogonTime .. (LogonTime + 5m))
+| project DeviceName, AccountName, RemoteIP, LogonType, LogonTime,
+    FileName, ProcessCommandLine, ProcessTime
+| sort by LogonTime desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Exclude known bastion/jump servers and IT admin workstations by DeviceName.
+// - For Scenario 2, filter on InitiatingProcessFileName to focus on
+//   non-Explorer processes (e.g., cmd.exe, powershell.exe).
+// - Adjust UniqueTargets thresholds based on environment size.
+// - Add time-of-day filtering: lateral movement outside business hours
+//   is higher confidence.
+// - Correlate with IdentityLogonEvents for cross-domain movement.
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - IT administrators performing routine remote management
+// - SCCM/MECM pushing software via admin shares
+// - Vulnerability scanners performing authenticated scans
+// - Remote monitoring tools (PRTG, SolarWinds) connecting via WMI
+// - Group Policy updates triggering SMB connections to DCs
+// - Mitigation: create device groups for admin workstations and exclude them
+// =============================================================================

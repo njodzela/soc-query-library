@@ -1,0 +1,100 @@
+// =============================================================================
+// Title:        Defense Evasion Detection
+// Description:  Detects defense evasion via log clearing, security tool tampering,
+//               process masquerading, and obfuscated commands.
+// MITRE ATT&CK: T1070.001 (Clear Windows Event Logs),
+//               T1562.001 (Disable or Modify Tools),
+//               T1036.005 (Match Legitimate Name or Location),
+//               T1027 (Obfuscated Files or Information)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  DeviceProcessEvents, DeviceEvents, DeviceRegistryEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: Windows event log clearing
+// Detects wevtutil cl, Clear-EventLog, and related log tampering
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where (FileName =~ "wevtutil.exe"
+        and ProcessCommandLine has_any ("cl", "clear-log"))
+    or (FileName =~ "powershell.exe"
+        and ProcessCommandLine has_any ("Clear-EventLog", "Remove-EventLog",
+            "wevtutil cl"))
+    or (FileName =~ "cmd.exe"
+        and ProcessCommandLine has "wevtutil" and ProcessCommandLine has "cl")
+| project Timestamp, DeviceName, AccountName, FileName,
+    ProcessCommandLine, InitiatingProcessFileName
+| extend AlertSeverity = "Critical"
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Security tool/service tampering
+// Detects stopping or disabling of AV, EDR, and firewall services
+// -----------------------------------------------------------------------------
+let SecurityServices = dynamic(["WinDefend", "MpsSvc", "wscsvc", "Sense",
+    "SepMasterService", "ccSvcHst", "McAfee", "avp", "bdagent",
+    "SAVService", "CrowdStrike", "SentinelAgent"]);
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where (FileName in~ ("net.exe", "net1.exe", "sc.exe")
+        and ProcessCommandLine has_any ("stop", "delete", "disabled"))
+    or (FileName =~ "powershell.exe"
+        and ProcessCommandLine has "Set-MpPreference"
+        and ProcessCommandLine has "-Disable")
+    or (FileName =~ "reg.exe"
+        and ProcessCommandLine has "DisableAntiSpyware")
+// Filter for security-related service names
+| where ProcessCommandLine has_any (SecurityServices)
+    or ProcessCommandLine has_any ("DisableAntiSpyware",
+        "DisableRealtimeMonitoring", "DisableBehaviorMonitoring")
+| project Timestamp, DeviceName, AccountName, FileName,
+    ProcessCommandLine, InitiatingProcessFileName
+| extend AlertSeverity = "Critical"
+| sort by Timestamp desc;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Process masquerading — system binaries from wrong locations
+// Detects executables with system binary names running from non-System32 paths
+// -----------------------------------------------------------------------------
+let SystemBinaries = dynamic(["svchost.exe", "csrss.exe", "lsass.exe",
+    "services.exe", "smss.exe", "wininit.exe", "winlogon.exe",
+    "spoolsv.exe", "taskhost.exe"]);
+DeviceProcessEvents
+| where Timestamp > ago(24h)
+| where FileName in~ (SystemBinaries)
+| where FolderPath !has "\\Windows\\System32"
+    and FolderPath !has "\\Windows\\SysWOW64"
+    and FolderPath !has "\\Windows\\WinSxS"
+| project Timestamp, DeviceName, AccountName, FileName,
+    FolderPath, ProcessCommandLine,
+    InitiatingProcessFileName, InitiatingProcessFolderPath
+| extend AlertSeverity = "Critical"
+| sort by Timestamp desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Scenario 1: Correlate with change management tickets. Exclude authorized
+//   log rotation during maintenance windows.
+// - Scenario 2: Add your specific security tool service names to the list.
+//   Enable Tamper Protection in Defender to prevent most of these actions.
+// - Scenario 3: If any legitimate software installs system-named binaries
+//   in non-standard paths, add path exclusions.
+// - Deploy ASR rules to complement detection with prevention.
+// - Consider DeviceEvents | ActionType == "TamperingAttempt" for built-in
+//   Defender tamper detection.
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - IT administrators clearing logs during scheduled maintenance
+// - Endpoint management tools restarting security services for updates
+// - Software installers that temporarily stop services during upgrades
+// - Windows servicing stack moving binaries during patching
+// - Virtualization tools installing helper binaries with system-like names
+// - Mitigation: correlate with user identity and change management records
+// =============================================================================

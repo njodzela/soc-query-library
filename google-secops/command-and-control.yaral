@@ -1,0 +1,144 @@
+/*
+ * Title:        Command and Control Detection
+ * Description:  Detects C2 communication patterns including beaconing, DNS-based C2,
+ *               encrypted channels on non-standard ports, and ingress tool transfer.
+ * MITRE ATT&CK: T1071.001 (Web Protocols), T1071.004 (DNS), T1573 (Encrypted Channel), T1105 (Ingress Tool Transfer)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Network Events, DNS Logs, Proxy Logs, Firewall Logs, EDR Telemetry
+ */
+
+// =============================================================================
+// Scenario 1: HTTP/S beaconing — regular interval callbacks
+// =============================================================================
+rule c2_http_beaconing {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects regular-interval HTTP/S connections suggesting C2 beaconing."
+    severity = "High"
+    mitre_attack = "T1071.001"
+
+  events:
+    $beacon.metadata.event_type = "NETWORK_HTTP"
+    $beacon.principal.ip = $src_ip
+    $beacon.target.hostname = $domain
+
+    // Outbound HTTP/HTTPS
+    ($beacon.target.port = 80 or $beacon.target.port = 443)
+
+    // Internal source
+    net.ip_in_range_cidr($beacon.principal.ip, "10.0.0.0/8") or
+    net.ip_in_range_cidr($beacon.principal.ip, "172.16.0.0/12") or
+    net.ip_in_range_cidr($beacon.principal.ip, "192.168.0.0/16")
+
+  match:
+    $src_ip, $domain over 1h
+
+  condition:
+    // High-frequency connections to same domain — likely automated
+    #beacon > 60
+
+  outcome:
+    $risk_score = 75
+    $connection_count = #beacon
+    $target_domain = array_distinct($beacon.target.hostname)
+}
+
+// =============================================================================
+// Scenario 2: DNS-based C2 — high volume of queries to single domain
+// =============================================================================
+rule c2_dns_channel {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects DNS-based C2 via excessive queries to a single parent domain."
+    severity = "High"
+    mitre_attack = "T1071.004"
+
+  events:
+    $dns.metadata.event_type = "NETWORK_DNS"
+    $dns.principal.ip = $src_ip
+    $dns.network.dns.questions.name = $query
+
+    // TXT records commonly used for C2 data channels
+    $dns.network.dns.questions.type = "TXT"
+
+  match:
+    $src_ip over 30m
+
+  condition:
+    // High volume of TXT queries from single host
+    #dns > 50
+
+  outcome:
+    $risk_score = 80
+    $query_count = #dns
+    $queried_domains = array_distinct($dns.network.dns.questions.name)
+}
+
+// =============================================================================
+// Scenario 3: Encrypted traffic on non-standard ports
+// =============================================================================
+rule c2_encrypted_nonstandard_port {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects TLS/SSL traffic on non-standard ports, often used by C2 frameworks."
+    severity = "High"
+    mitre_attack = "T1573"
+
+  events:
+    $conn.metadata.event_type = "NETWORK_CONNECTION"
+    $conn.principal.ip = $src_ip
+    $conn.target.ip = $dst_ip
+    $conn.target.port = $port
+
+    // TLS detected but NOT on standard ports
+    $conn.network.application_protocol = "TLS"
+    $conn.target.port != 443
+    $conn.target.port != 8443
+    $conn.target.port != 993
+    $conn.target.port != 995
+    $conn.target.port != 636
+
+    // External destination
+    not net.ip_in_range_cidr($conn.target.ip, "10.0.0.0/8")
+    not net.ip_in_range_cidr($conn.target.ip, "172.16.0.0/12")
+    not net.ip_in_range_cidr($conn.target.ip, "192.168.0.0/16")
+
+  match:
+    $src_ip over 1h
+
+  condition:
+    #conn > 5
+
+  outcome:
+    $risk_score = 80
+    $destinations = array_distinct($conn.target.ip)
+    $ports_used = array_distinct($conn.target.port)
+    $connection_count = #conn
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Scenario 1: Tune the >60 threshold based on your environment. Consider
+ *   statistical analysis for beaconing jitter detection.
+ * - Scenario 2: Exclude known TXT-heavy domains (SPF lookups, DKIM, DMARC).
+ *   Filter on parent domain rather than full FQDN.
+ * - Scenario 3: Build an allow-list of services that legitimately use TLS on
+ *   non-standard ports (VPN concentrators, custom apps).
+ * - Integrate with threat intelligence feeds for known C2 infrastructure.
+ * - Consider JA3/JA3S fingerprint matching for known C2 frameworks.
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - CDN and SaaS applications that make frequent API calls (Slack, Teams)
+ * - Software update checks that poll regularly (Windows Update, Chrome)
+ * - Monitoring agents sending heartbeats to cloud dashboards
+ * - VPN and SD-WAN solutions using TLS on non-443 ports
+ * - DNS-based load balancing and CDN resolution (many TXT queries)
+ * - Mitigation: baseline normal beacon-like patterns and exclude known-good
+ */

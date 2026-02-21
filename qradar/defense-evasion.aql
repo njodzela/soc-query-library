@@ -1,0 +1,71 @@
+-- ============================================================
+-- Title: Defense Evasion Detection
+-- Description: Detects log clearing, security tool tampering,
+--              and process masquerading.
+-- MITRE ATT&CK: T1070.001, T1562.001, T1036.005, T1027
+-- Severity: High
+-- Data Sources: Windows Security/System Events, Sysmon
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Event log cleared ===
+SELECT
+    username,
+    "ComputerName" AS host,
+    "EventID",
+    starttime
+FROM events
+WHERE "EventID" IN ('1102', '104')
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- === Scenario 2: Security tool disabled ===
+SELECT
+    username,
+    "ComputerName" AS host,
+    "CommandLine" AS command,
+    "Image" AS process,
+    starttime
+FROM events
+WHERE "EventID" = '1'
+    AND ("CommandLine" ILIKE '%Stop-Service%'
+        OR "CommandLine" ILIKE '%net stop%'
+        OR "CommandLine" ILIKE '%sc stop%'
+        OR "CommandLine" ILIKE '%sc config%disabled%'
+        OR "CommandLine" ILIKE '%DisableRealtimeMonitoring%')
+    AND ("CommandLine" ILIKE '%Defender%'
+        OR "CommandLine" ILIKE '%WinDefend%'
+        OR "CommandLine" ILIKE '%Sense%'
+        OR "CommandLine" ILIKE '%MpsSvc%')
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- === Scenario 3: Process masquerading ===
+SELECT
+    username,
+    "ComputerName" AS host,
+    "Image" AS process_path,
+    "CommandLine" AS command,
+    starttime
+FROM events
+WHERE "EventID" = '1'
+    AND (("Image" ILIKE '%svchost.exe' AND "Image" NOT ILIKE 'C:\\Windows\\System32\\svchost.exe')
+        OR ("Image" ILIKE '%csrss.exe' AND "Image" NOT ILIKE 'C:\\Windows\\System32\\csrss.exe')
+        OR ("Image" ILIKE '%lsass.exe' AND "Image" NOT ILIKE 'C:\\Windows\\System32\\lsass.exe'))
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Whitelist authorized log management tools
+-- - Allow maintenance windows for security tool updates
+-- - Include all valid system binary paths per OS version
+-- - Set offense magnitude higher for log clearing events
+--
+-- FALSE POSITIVES:
+-- - Authorized log rotation by SIEM collectors
+-- - IT updating security tool configurations
+-- - Windows servicing updating system binaries
+-- - Diagnostic tools with system-binary-like names
+-- ============================================================

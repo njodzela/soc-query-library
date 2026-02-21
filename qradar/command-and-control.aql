@@ -1,0 +1,68 @@
+-- ============================================================
+-- Title: Command and Control Detection
+-- Description: Detects C2 beaconing via flow analysis, DNS-based C2,
+--              and connections to known malicious infrastructure.
+-- MITRE ATT&CK: T1071.001, T1071.004, T1573, T1105
+-- Severity: Critical
+-- Data Sources: Firewall/Flow, DNS logs, Proxy logs, Threat intel
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Beaconing detection via regular flow intervals ===
+SELECT
+    sourceip,
+    destinationip,
+    destinationport,
+    COUNT(*) AS connection_count,
+    AVG(sourcebytes) AS avg_bytes,
+    STDEV(sourcebytes) AS stdev_bytes
+FROM flows
+WHERE NOT INCIDR(destinationip, '10.0.0.0/8')
+    AND NOT INCIDR(destinationip, '172.16.0.0/12')
+    AND starttime > NOW() - 4 * 60 * 60000
+GROUP BY sourceip, destinationip, destinationport
+HAVING connection_count > 50 AND stdev_bytes < 100
+ORDER BY connection_count DESC
+LAST 4 HOURS
+
+-- === Scenario 2: DNS-based C2 / DGA detection ===
+SELECT
+    sourceip,
+    "DNS_QueryName" AS query,
+    COUNT(*) AS query_count,
+    COUNT(DISTINCT "DNS_QueryName") AS unique_subdomains,
+    AVG(LENGTH("DNS_QueryName")) AS avg_query_length
+FROM events
+WHERE LOGSOURCETYPENAME(logsourceid) ILIKE '%DNS%'
+    AND LENGTH("DNS_QueryName") > 50
+GROUP BY sourceip, "DNS_QueryName"
+HAVING unique_subdomains > 50 AND avg_query_length > 40
+ORDER BY unique_subdomains DESC
+LAST 1 HOURS
+
+-- === Scenario 3: Connection to threat intel IOCs ===
+SELECT
+    sourceip,
+    destinationip,
+    destinationport,
+    COUNT(*) AS connection_count,
+    starttime
+FROM events
+WHERE REFERENCESETCONTAINS('threat_intel_ips', destinationip)
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Update 'threat_intel_ips' reference set from STIX/TAXII feeds daily
+-- - Tune beaconing stdev threshold based on environment noise
+-- - Exclude CDN and SaaS IPs from beaconing analysis
+-- - Adjust DNS query length threshold after baselining
+--
+-- FALSE POSITIVES:
+-- - Application heartbeats with regular intervals
+-- - DNS load balancing with long CNAME chains
+-- - Stale IOCs in threat intel reference sets
+-- - NTP and telemetry traffic
+-- ============================================================

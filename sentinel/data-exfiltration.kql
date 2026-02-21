@@ -1,0 +1,65 @@
+// ============================================================
+// Title: Data Exfiltration Detection
+// Description: Detects large outbound transfers, cloud storage abuse,
+//              and email-based data exfiltration.
+// MITRE ATT&CK: T1048.001, T1048.002, T1567, T1041
+// Severity: Critical
+// Data Sources: CommonSecurityLog, OfficeActivity, DeviceNetworkEvents
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Anomalous outbound data volume ===
+CommonSecurityLog
+| where TimeGenerated > ago(1h)
+| where CommunicationDirection == "Outbound"
+| where not(ipv4_is_private(DestinationIP))
+| summarize
+    TotalBytesOut = sum(SentBytes),
+    UniqueDestinations = dcount(DestinationIP),
+    TopDests = make_set(DestinationIP, 10)
+    by SourceIP, bin(TimeGenerated, 1h)
+| where TotalBytesOut > 500000000  // 500MB threshold
+| extend TotalMB = round(TotalBytesOut / 1048576.0, 2)
+| sort by TotalBytesOut desc
+
+// === Scenario 2: Bulk SharePoint/OneDrive file downloads ===
+OfficeActivity
+| where TimeGenerated > ago(1h)
+| where Operation in ("FileDownloaded", "FileSyncDownloadedFull")
+| summarize
+    DownloadCount = count(),
+    UniqueFiles = dcount(OfficeObjectId),
+    TotalSize = sum(toint(OfficeObjectId))
+    by UserId, ClientIP, bin(TimeGenerated, 30m)
+| where DownloadCount > 50
+| sort by DownloadCount desc
+
+// === Scenario 3: Email exfiltration — large or many attachments sent externally ===
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where Operation == "Send" and RecipientCount > 0
+| where ExternalAccess == true
+| mv-expand parse_json(Recipients)
+| where Recipients !endswith "@yourdomain.com"
+| summarize
+    EmailsSent = count(),
+    UniqueRecipients = dcount(tostring(Recipients)),
+    Recipients = make_set(tostring(Recipients), 10)
+    by UserId, bin(TimeGenerated, 1h)
+| where EmailsSent > 20 or UniqueRecipients > 10
+| sort by EmailsSent desc
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Adjust 500MB threshold to environment baseline
+// - Whitelist known backup and replication destinations
+// - Add domain exclusions for sanctioned cloud services
+// - Correlate with DLP policy violations for high-fidelity alerts
+//
+// FALSE POSITIVES:
+// - Authorized large file transfers (media teams, engineering)
+// - OneDrive sync operations
+// - Mass email campaigns from marketing
+// - Cloud backup and disaster recovery operations
+// ============================================================

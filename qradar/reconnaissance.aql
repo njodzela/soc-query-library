@@ -1,0 +1,72 @@
+-- ============================================================
+-- Title: Reconnaissance Detection
+-- Description: Detects port scanning, AD enumeration, and network
+--              discovery command execution.
+-- MITRE ATT&CK: T1595, T1592, T1589, T1590
+-- Severity: Medium
+-- Data Sources: Firewall/Flow data, Windows Security, Sysmon
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Port scanning via flow data ===
+SELECT
+    sourceip,
+    COUNT(DISTINCT destinationport) AS unique_ports,
+    COUNT(DISTINCT destinationip) AS unique_hosts,
+    COUNT(*) AS total_connections
+FROM flows
+WHERE starttime > NOW() - 5 * 60000
+GROUP BY sourceip
+HAVING unique_ports > 50 OR unique_hosts > 20
+ORDER BY total_connections DESC
+LAST 1 HOURS
+
+-- === Scenario 2: Active Directory enumeration ===
+SELECT
+    username,
+    sourceip,
+    COUNT(DISTINCT "ObjectName") AS objects_queried,
+    COUNT(*) AS total_queries
+FROM events
+WHERE "EventID" = '4662'
+    AND ("ObjectType" ILIKE '%domain%'
+        OR "ObjectType" ILIKE '%groupPolicyContainer%')
+GROUP BY username, sourceip
+HAVING objects_queried > 100
+ORDER BY objects_queried DESC
+LAST 1 HOURS
+
+-- === Scenario 3: Recon command execution ===
+SELECT
+    username,
+    "ComputerName" AS host,
+    "Image" AS process,
+    "CommandLine" AS command,
+    starttime
+FROM events
+WHERE "EventID" = '1'
+    AND ("Image" ILIKE '%net.exe'
+        OR "Image" ILIKE '%nltest.exe'
+        OR "Image" ILIKE '%dsquery.exe'
+        OR "Image" ILIKE '%nslookup.exe'
+        OR "Image" ILIKE '%whoami.exe'
+        OR "Image" ILIKE '%systeminfo.exe'
+        OR "Image" ILIKE '%arp.exe'
+        OR "Image" ILIKE '%ipconfig.exe')
+ORDER BY starttime DESC
+LAST 1 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Add vulnerability scanner IPs to reference set exclusions
+-- - Baseline LDAP query volumes per service account
+-- - Whitelist IT admin workstations for recon commands
+-- - Adjust port/host thresholds per network segment size
+--
+-- FALSE POSITIVES:
+-- - Vulnerability scanners (Nessus, Qualys)
+-- - Network monitoring tools (PRTG, SolarWinds)
+-- - IT admins running diagnostics
+-- - SCCM discovery processes
+-- ============================================================

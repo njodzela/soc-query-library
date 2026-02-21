@@ -1,0 +1,65 @@
+// ============================================================
+// Title: Phishing Indicator Detection
+// Description: Identifies phishing through suspicious email patterns,
+//              OAuth consent phishing, and URL click analysis.
+// MITRE ATT&CK: T1566.001, T1566.002, T1598
+// Severity: High
+// Data Sources: EmailEvents, UrlClickEvents, SigninLogs, OfficeActivity
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Emails with suspicious attachments delivered ===
+EmailEvents
+| where TimeGenerated > ago(24h)
+| where DeliveryAction == "Delivered"
+| where AttachmentCount > 0
+| join kind=inner (
+    EmailAttachmentInfo
+    | where TimeGenerated > ago(24h)
+    | where FileName endswith ".exe" or FileName endswith ".scr"
+        or FileName endswith ".js" or FileName endswith ".vbs"
+        or FileName endswith ".hta" or FileName endswith ".iso"
+        or FileName endswith ".lnk" or FileName endswith ".html"
+) on NetworkMessageId
+| summarize AttachmentFiles = make_set(FileName, 10) by SenderFromAddress, RecipientEmailAddress, Subject
+| sort by SenderFromAddress
+
+// === Scenario 2: OAuth consent phishing — suspicious app consent ===
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName == "Consent to application"
+| where Result == "success"
+| extend AppName = tostring(TargetResources[0].displayName)
+| extend Permissions = tostring(TargetResources[0].modifiedProperties)
+| where Permissions has "Mail.Read" or Permissions has "Files.ReadWrite"
+    or Permissions has "User.ReadWrite"
+| project TimeGenerated, InitiatedBy, AppName, Permissions
+
+// === Scenario 3: Users clicking URLs then reporting suspicious ===
+UrlClickEvents
+| where TimeGenerated > ago(24h)
+| where ActionType == "ClickAllowed"
+| where UrlChain has "login" or UrlChain has "signin" or UrlChain has "verify"
+| where not(UrlChain has_any ("microsoft.com", "office.com", "google.com"))
+| summarize
+    ClickCount = count(),
+    UniqueUsers = dcount(AccountUpn),
+    Users = make_set(AccountUpn, 10)
+    by Url, bin(TimeGenerated, 1h)
+| where UniqueUsers > 2
+| sort by UniqueUsers desc
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Update suspicious file extensions based on current TTPs
+// - Add sanctioned OAuth apps to exclusion list
+// - Whitelist internal learning/phishing simulation platforms
+// - Integrate with Safe Links for additional URL context
+//
+// FALSE POSITIVES:
+// - Approved vendor sending executable installers
+// - Legitimate OAuth apps requesting permissions
+// - Phishing simulation tools (KnowBe4, Proofpoint)
+// - Internal links with "login" in the URL path
+// ============================================================

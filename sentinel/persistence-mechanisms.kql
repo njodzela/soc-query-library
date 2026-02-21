@@ -1,0 +1,51 @@
+// ============================================================
+// Title: Persistence Mechanism Detection
+// Description: Detects scheduled tasks, registry run key changes,
+//              new service installations, and Azure AD app registrations.
+// MITRE ATT&CK: T1053.005, T1547.001, T1136, T1543.003
+// Severity: High
+// Data Sources: SecurityEvent, SysmonEvent, AuditLogs
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Suspicious scheduled task creation ===
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4698  // Scheduled task created
+| extend TaskContent = EventData
+| where TaskContent has "powershell" or TaskContent has "cmd.exe"
+    or TaskContent has "wscript" or TaskContent has "mshta"
+    or TaskContent has "\\AppData\\" or TaskContent has "\\Temp\\"
+| project TimeGenerated, Account, Computer, TaskContent
+
+// === Scenario 2: Registry run key persistence (Sysmon) ===
+Event
+| where Source == "Microsoft-Windows-Sysmon" and EventID == 13
+| extend RenderedDescription = tostring(EventData)
+| where RenderedDescription has "\\CurrentVersion\\Run"
+    or RenderedDescription has "\\CurrentVersion\\RunOnce"
+| project TimeGenerated, Computer, RenderedDescription
+
+// === Scenario 3: Azure AD application credential added (backdoor app) ===
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName in ("Add service principal credentials",
+    "Update application – Certificates and secrets management")
+| extend Actor = tostring(InitiatedBy.user.userPrincipalName)
+| extend AppName = tostring(TargetResources[0].displayName)
+| project TimeGenerated, Actor, AppName, OperationName, CorrelationId
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Maintain allowlist of expected scheduled tasks
+// - Whitelist GPO-deployed registry changes
+// - Monitor app credential additions against change management
+// - Set higher severity for tasks running from user-writable paths
+//
+// FALSE POSITIVES:
+// - Software installations creating scheduled tasks
+// - Group Policy deploying registry run keys
+// - Authorized app credential rotation
+// - Windows Update scheduled tasks
+// ============================================================

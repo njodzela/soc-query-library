@@ -1,0 +1,722 @@
+{
+  "name": "SOC Query Library - Detection Coverage",
+  "versions": {
+    "attack": "14",
+    "navigator": "4.9.1",
+    "layer": "4.5"
+  },
+  "domain": "enterprise-attack",
+  "description": "MITRE ATT&CK coverage map for the SOC Query Library. Covers detections across Splunk, Sentinel, QRadar, Google SecOps, and Microsoft Defender.",
+  "filters": {
+    "platforms": [
+      "Windows",
+      "Linux",
+      "macOS",
+      "Azure AD",
+      "Office 365",
+      "Google Workspace",
+      "Network",
+      "PRE"
+    ]
+  },
+  "sorting": 0,
+  "layout": {
+    "layout": "side",
+    "aggregateFunction": "average",
+    "showID": true,
+    "showName": true,
+    "showAggregateScores": true,
+    "countUnscored": false,
+    "expandedSubtechniques": "annotated"
+  },
+  "hideDisabled": false,
+  "techniques": [
+    {
+      "techniqueID": "T1110",
+      "tactic": "credential-access",
+      "color": "#ff6666",
+      "comment": "Brute Force - All sub-techniques covered across 5 platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1110.001",
+      "tactic": "credential-access",
+      "color": "#ff6666",
+      "comment": "Password Guessing - Splunk, Sentinel, QRadar, Google SecOps, Defender",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1110.003",
+      "tactic": "credential-access",
+      "color": "#ff6666",
+      "comment": "Password Spraying - Splunk, Sentinel, QRadar, Google SecOps, Defender",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1110.004",
+      "tactic": "credential-access",
+      "color": "#ff6666",
+      "comment": "Credential Stuffing - Splunk, Sentinel, QRadar, Google SecOps, Defender",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1021",
+      "tactic": "lateral-movement",
+      "color": "#ff9900",
+      "comment": "Remote Services - Lateral movement detection across all platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1021.001",
+      "tactic": "lateral-movement",
+      "color": "#ff9900",
+      "comment": "Remote Desktop Protocol - Splunk, Sentinel, QRadar, Google SecOps, Defender",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1021.002",
+      "tactic": "lateral-movement",
+      "color": "#ff9900",
+      "comment": "SMB/Windows Admin Shares - Splunk, Sentinel, QRadar, Google SecOps, Defender",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1021.004",
+      "tactic": "lateral-movement",
+      "color": "#ff9900",
+      "comment": "SSH - Splunk, Sentinel, QRadar, Google SecOps, Defender",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1570",
+      "tactic": "lateral-movement",
+      "color": "#ff9900",
+      "comment": "Lateral Tool Transfer - Splunk, Sentinel, QRadar, Google SecOps, Defender",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1048",
+      "tactic": "exfiltration",
+      "color": "#cc33ff",
+      "comment": "Exfiltration Over Alternative Protocol - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1048.001",
+      "tactic": "exfiltration",
+      "color": "#cc33ff",
+      "comment": "Exfil Over Symmetric Encrypted Non-C2 Protocol",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1048.002",
+      "tactic": "exfiltration",
+      "color": "#cc33ff",
+      "comment": "Exfil Over Asymmetric Encrypted Non-C2 Protocol",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1567",
+      "tactic": "exfiltration",
+      "color": "#cc33ff",
+      "comment": "Exfiltration to Cloud Storage - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1041",
+      "tactic": "exfiltration",
+      "color": "#cc33ff",
+      "comment": "Exfiltration Over C2 Channel - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1566",
+      "tactic": "initial-access",
+      "color": "#33ccff",
+      "comment": "Phishing - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1566.001",
+      "tactic": "initial-access",
+      "color": "#33ccff",
+      "comment": "Spearphishing Attachment - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1566.002",
+      "tactic": "initial-access",
+      "color": "#33ccff",
+      "comment": "Spearphishing Link - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1598",
+      "tactic": "reconnaissance",
+      "color": "#33ccff",
+      "comment": "Phishing for Information - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1068",
+      "tactic": "privilege-escalation",
+      "color": "#ffcc00",
+      "comment": "Exploitation for Privilege Escalation - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1548",
+      "tactic": "privilege-escalation",
+      "color": "#ffcc00",
+      "comment": "Abuse Elevation Control Mechanism - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1548.002",
+      "tactic": "privilege-escalation",
+      "color": "#ffcc00",
+      "comment": "Bypass User Account Control - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1134",
+      "tactic": "privilege-escalation",
+      "color": "#ffcc00",
+      "comment": "Access Token Manipulation - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1078",
+      "tactic": "privilege-escalation",
+      "color": "#ffcc00",
+      "comment": "Valid Accounts - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1078.002",
+      "tactic": "privilege-escalation",
+      "color": "#ffcc00",
+      "comment": "Domain Accounts - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1053",
+      "tactic": "persistence",
+      "color": "#66cc66",
+      "comment": "Scheduled Task/Job - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1053.005",
+      "tactic": "persistence",
+      "color": "#66cc66",
+      "comment": "Scheduled Task - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1547",
+      "tactic": "persistence",
+      "color": "#66cc66",
+      "comment": "Boot or Logon Autostart Execution - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1547.001",
+      "tactic": "persistence",
+      "color": "#66cc66",
+      "comment": "Registry Run Keys / Startup Folder - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1136",
+      "tactic": "persistence",
+      "color": "#66cc66",
+      "comment": "Create Account - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1543",
+      "tactic": "persistence",
+      "color": "#66cc66",
+      "comment": "Create or Modify System Process - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1543.003",
+      "tactic": "persistence",
+      "color": "#66cc66",
+      "comment": "Windows Service - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1071",
+      "tactic": "command-and-control",
+      "color": "#6666ff",
+      "comment": "Application Layer Protocol - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1071.001",
+      "tactic": "command-and-control",
+      "color": "#6666ff",
+      "comment": "Web Protocols - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1071.004",
+      "tactic": "command-and-control",
+      "color": "#6666ff",
+      "comment": "DNS - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1573",
+      "tactic": "command-and-control",
+      "color": "#6666ff",
+      "comment": "Encrypted Channel - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1105",
+      "tactic": "command-and-control",
+      "color": "#6666ff",
+      "comment": "Ingress Tool Transfer - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1003",
+      "tactic": "credential-access",
+      "color": "#ff6666",
+      "comment": "OS Credential Dumping - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1003.001",
+      "tactic": "credential-access",
+      "color": "#ff6666",
+      "comment": "LSASS Memory - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1558",
+      "tactic": "credential-access",
+      "color": "#ff6666",
+      "comment": "Steal or Forge Kerberos Tickets - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1558.003",
+      "tactic": "credential-access",
+      "color": "#ff6666",
+      "comment": "Kerberoasting - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1555",
+      "tactic": "credential-access",
+      "color": "#ff6666",
+      "comment": "Credentials from Password Stores - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1552",
+      "tactic": "credential-access",
+      "color": "#ff6666",
+      "comment": "Unsecured Credentials - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1070",
+      "tactic": "defense-evasion",
+      "color": "#999966",
+      "comment": "Indicator Removal - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1070.001",
+      "tactic": "defense-evasion",
+      "color": "#999966",
+      "comment": "Clear Windows Event Logs - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1562",
+      "tactic": "defense-evasion",
+      "color": "#999966",
+      "comment": "Impair Defenses - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1562.001",
+      "tactic": "defense-evasion",
+      "color": "#999966",
+      "comment": "Disable or Modify Tools - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1036",
+      "tactic": "defense-evasion",
+      "color": "#999966",
+      "comment": "Masquerading - All platforms",
+      "enabled": true,
+      "metadata": [],
+      "links": [],
+      "showSubtechniques": true,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1036.005",
+      "tactic": "defense-evasion",
+      "color": "#999966",
+      "comment": "Match Legitimate Name or Location - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1027",
+      "tactic": "defense-evasion",
+      "color": "#999966",
+      "comment": "Obfuscated Files or Information - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1595",
+      "tactic": "reconnaissance",
+      "color": "#66cccc",
+      "comment": "Active Scanning - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1592",
+      "tactic": "reconnaissance",
+      "color": "#66cccc",
+      "comment": "Gather Victim Host Information - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1589",
+      "tactic": "reconnaissance",
+      "color": "#66cccc",
+      "comment": "Gather Victim Identity Information - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    },
+    {
+      "techniqueID": "T1590",
+      "tactic": "reconnaissance",
+      "color": "#66cccc",
+      "comment": "Gather Victim Network Information - All platforms",
+      "enabled": true,
+      "metadata": [
+        { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Defender" }
+      ],
+      "links": [],
+      "showSubtechniques": false,
+      "score": 100
+    }
+  ],
+  "gradient": {
+    "colors": ["#ffffff", "#ff6666"],
+    "minValue": 0,
+    "maxValue": 100
+  },
+  "legendItems": [
+    { "label": "Full Coverage (5 platforms)", "color": "#ff6666" },
+    { "label": "Credential Access", "color": "#ff6666" },
+    { "label": "Lateral Movement", "color": "#ff9900" },
+    { "label": "Privilege Escalation", "color": "#ffcc00" },
+    { "label": "Persistence", "color": "#66cc66" },
+    { "label": "Command and Control", "color": "#6666ff" },
+    { "label": "Exfiltration", "color": "#cc33ff" },
+    { "label": "Initial Access", "color": "#33ccff" },
+    { "label": "Defense Evasion", "color": "#999966" },
+    { "label": "Reconnaissance", "color": "#66cccc" }
+  ],
+  "showTacticRowBackground": true,
+  "tacticRowBackground": "#dddddd",
+  "selectTechniquesAcrossTactics": false,
+  "selectSubtechniquesWithParent": false,
+  "selectVisibleTechniques": false,
+  "metadata": [
+    { "name": "author", "value": "Christian M. Njodzela" },
+    { "name": "date", "value": "2026-02-21" },
+    { "name": "repository", "value": "SOC Query Library" },
+    { "name": "platforms", "value": "Splunk, Sentinel, QRadar, Google SecOps, Microsoft Defender" }
+  ]
+}

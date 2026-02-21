@@ -1,0 +1,65 @@
+// ============================================================
+// Title: Lateral Movement Detection
+// Description: Detects RDP from unusual sources, SMB lateral movement,
+//              and remote PowerShell sessions across the network.
+// MITRE ATT&CK: T1021.001, T1021.002, T1021.006, T1570
+// Severity: High
+// Data Sources: SecurityEvent, DeviceNetworkEvents, DeviceLogonEvents
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: RDP logon from non-standard source ===
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4624 and LogonType == 10
+| where IpAddress !in ("127.0.0.1", "::1")
+| summarize
+    RDPCount = count(),
+    UniqueTargets = dcount(Computer),
+    Targets = make_set(Computer, 20)
+    by IpAddress, Account
+| where UniqueTargets > 3
+| sort by UniqueTargets desc
+
+// === Scenario 2: SMB lateral movement — accessing admin shares ===
+SecurityEvent
+| where TimeGenerated > ago(12h)
+| where EventID == 5140  // Network share access
+| where ShareName in ("\\\\*\\ADMIN$", "\\\\*\\C$", "\\\\*\\IPC$")
+| where AccountType == "User"
+| summarize
+    AccessCount = count(),
+    UniqueShares = dcount(ShareName),
+    UniqueHosts = dcount(Computer),
+    Hosts = make_set(Computer, 20)
+    by IpAddress, Account, bin(TimeGenerated, 1h)
+| where UniqueHosts > 3
+| sort by UniqueHosts desc
+
+// === Scenario 3: Remote PowerShell (WinRM) sessions ===
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4624 and LogonType == 3
+| where ProcessName has "wsmprovhost.exe"
+| summarize
+    SessionCount = count(),
+    UniqueTargets = dcount(Computer),
+    Targets = make_set(Computer, 15)
+    by IpAddress, Account
+| where SessionCount > 2
+| sort by UniqueTargets desc
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Maintain allowlist of approved jump servers and admin IPs
+// - Exclude service accounts used for authorized remote management
+// - Reduce UniqueTargets threshold for high-security zones
+// - Correlate with VPN logs to identify source user
+//
+// FALSE POSITIVES:
+// - IT admins performing routine remote management
+// - SCCM/Intune client operations
+// - Automated deployment scripts using WinRM
+// - Backup agents accessing admin shares
+// ============================================================

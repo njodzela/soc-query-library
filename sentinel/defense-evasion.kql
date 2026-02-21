@@ -1,0 +1,52 @@
+// ============================================================
+// Title: Defense Evasion Detection
+// Description: Detects log tampering, security tool disabling,
+//              process masquerading, and obfuscated script execution.
+// MITRE ATT&CK: T1070.001, T1562.001, T1036.005, T1027
+// Severity: High
+// Data Sources: SecurityEvent, DeviceProcessEvents, AzureActivity
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Security event log cleared ===
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 1102 or (EventID == 104 and EventSourceName == "Microsoft-Windows-Eventlog")
+| project TimeGenerated, Computer, Account, Activity
+
+// === Scenario 2: Security tooling disabled or tampered ===
+DeviceProcessEvents
+| where TimeGenerated > ago(24h)
+| where ProcessCommandLine has_any (
+    "Stop-Service", "net stop", "sc stop", "sc config",
+    "DisableRealtimeMonitoring", "Set-MpPreference",
+    "Uninstall-WindowsFeature", "Remove-WindowsFeature"
+)
+| where ProcessCommandLine has_any (
+    "Defender", "Sense", "WinDefend", "MpsSvc",
+    "SecurityHealthService", "wscsvc"
+)
+| project TimeGenerated, DeviceName, AccountName, ProcessCommandLine,
+    InitiatingProcessFileName
+
+// === Scenario 3: Process masquerading (system binary in wrong location) ===
+DeviceProcessEvents
+| where TimeGenerated > ago(24h)
+| where FileName in~ ("svchost.exe", "csrss.exe", "lsass.exe", "services.exe", "smss.exe")
+| where not(FolderPath startswith "C:\\Windows\\System32\\" or FolderPath startswith "c:\\windows\\system32\\")
+| project TimeGenerated, DeviceName, FileName, FolderPath, ProcessCommandLine, AccountName
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Whitelist authorized log management processes
+// - Allow IT-approved maintenance windows for tool updates
+// - Validate all system binary paths per Windows version
+// - Integrate with change management for expected changes
+//
+// FALSE POSITIVES:
+// - SIEM log collectors with authorized log rotation
+// - IT patching and updating security tools
+// - Windows servicing stack updating system binaries
+// - Sysinternals tools running from non-standard paths
+// ============================================================

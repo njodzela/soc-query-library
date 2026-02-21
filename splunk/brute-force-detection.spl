@@ -1,0 +1,54 @@
+` ============================================================
+` Title: Brute-Force Login Detection
+` Description: Detects multiple failed authentication attempts followed
+`              by a successful login, indicating potential credential
+`              brute-forcing or password spraying attacks.
+` MITRE ATT&CK: T1110.001 (Password Guessing), T1110.003 (Password Spraying),
+`               T1110.004 (Credential Stuffing)
+` Severity: High
+` Data Sources: Windows Security Event Log (4625, 4624), Linux auth.log,
+`              Authentication logs (CIM: Authentication datamodel)
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Single-source brute force against one account ===
+` Detects >10 failed logins from one IP to one account within 10 minutes
+index=windows sourcetype="WinEventLog:Security" EventCode=4625
+| bin _time span=10m
+| stats count as failed_attempts dc(src_ip) as unique_sources values(src_ip) as source_ips by Account_Name, _time
+| where failed_attempts > 10 AND unique_sources <= 2
+| sort -failed_attempts
+
+` === Scenario 2: Password spraying (one source, many accounts) ===
+` Detects a single IP attempting logins against multiple accounts
+index=windows sourcetype="WinEventLog:Security" EventCode=4625
+| bin _time span=15m
+| stats count as attempts dc(Account_Name) as targeted_accounts values(Account_Name) as accounts by src_ip, _time
+| where targeted_accounts > 5 AND attempts > 20
+| sort -targeted_accounts
+
+` === Scenario 3: Brute force with subsequent successful login ===
+` Correlates failed attempts with a successful login — strongest indicator
+index=windows sourcetype="WinEventLog:Security" (EventCode=4625 OR EventCode=4624)
+| eval status=if(EventCode=4625, "failure", "success")
+| bin _time span=30m
+| stats count(eval(status="failure")) as failures count(eval(status="success")) as successes values(src_ip) as source_ips by Account_Name, _time
+| where failures > 10 AND successes > 0
+| eval risk_score=case(failures>50, "Critical", failures>20, "High", true(), "Medium")
+| sort -failures
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Exclude service accounts with known high-volume auth patterns
+` - Adjust threshold (>10) based on environment baseline
+` - Whitelist trusted IP ranges (VPN concentrators, jump boxes)
+` - Consider adding | inputlookup approved_service_accounts.csv
+`   to filter known automated accounts
+`
+` FALSE POSITIVES:
+` - Misconfigured service accounts with expired credentials
+` - Users with caps-lock on or recently changed passwords
+` - Automated scanners from vulnerability assessment tools
+` - SSO/MFA re-authentication loops
+` ============================================================

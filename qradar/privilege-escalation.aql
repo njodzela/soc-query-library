@@ -1,0 +1,68 @@
+-- ============================================================
+-- Title: Privilege Escalation Detection
+-- Description: Detects sensitive privilege assignment, admin group
+--              additions, and UAC bypass indicators.
+-- MITRE ATT&CK: T1068, T1548.002, T1134, T1078.002
+-- Severity: Critical
+-- Data Sources: Windows Security Events, Sysmon
+-- Author: Christian M. Njodzela
+-- Date: 2026-02-21
+-- ============================================================
+
+-- === Scenario 1: Sensitive privilege assigned to user ===
+SELECT
+    username,
+    "ComputerName" AS host,
+    "Privileges" AS privileges_assigned,
+    starttime
+FROM events
+WHERE "EventID" = '4672'
+    AND username NOT IN ('SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE')
+    AND ("Privileges" ILIKE '%SeDebugPrivilege%'
+        OR "Privileges" ILIKE '%SeTcbPrivilege%'
+        OR "Privileges" ILIKE '%SeImpersonatePrivilege%')
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- === Scenario 2: User added to privileged group ===
+SELECT
+    username AS actor,
+    "MemberName" AS added_user,
+    "TargetUserName" AS group_name,
+    "ComputerName" AS host,
+    starttime
+FROM events
+WHERE "EventID" IN ('4728', '4732', '4756')
+    AND ("TargetUserName" ILIKE '%Admin%'
+        OR "TargetUserName" ILIKE '%Domain Admins%'
+        OR "TargetUserName" ILIKE '%Enterprise Admins%')
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- === Scenario 3: UAC bypass via registry modification ===
+SELECT
+    sourceip,
+    username,
+    "TargetObject" AS registry_key,
+    "Details" AS registry_value,
+    starttime
+FROM events
+WHERE "EventID" = '13'  -- Sysmon RegistryValueSet
+    AND ("TargetObject" ILIKE '%ms-settings\\Shell\\Open\\command%'
+        OR "TargetObject" ILIKE '%mscfile\\Shell\\Open\\command%')
+ORDER BY starttime DESC
+LAST 24 HOURS
+
+-- ============================================================
+-- TUNING RECOMMENDATIONS:
+-- - Exclude known admin accounts from privilege alerts using reference sets
+-- - Correlate group additions with ticketing system
+-- - Whitelist approved UAC registry modifications from GPO
+-- - Set higher priority for Domain/Enterprise Admin group changes
+--
+-- FALSE POSITIVES:
+-- - IT provisioning adding users to admin groups per ticket
+-- - Debugging tools requesting SeDebugPrivilege
+-- - Group Policy applying registry settings
+-- - Authorized PIM/PAM operations
+-- ============================================================

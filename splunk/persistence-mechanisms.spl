@@ -1,0 +1,54 @@
+` ============================================================
+` Title: Persistence Mechanism Detection
+` Description: Identifies persistence techniques including scheduled tasks,
+`              registry run keys, new services, and startup folder abuse.
+` MITRE ATT&CK: T1053.005 (Scheduled Task), T1547.001 (Registry Run Keys),
+`               T1136 (Create Account), T1543.003 (Windows Service)
+` Severity: High
+` Data Sources: Windows Security (4698, 4720, 7045), Sysmon (1, 11, 13),
+`              Windows System logs
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Suspicious scheduled task creation ===
+` Detects creation of scheduled tasks running unusual binaries
+index=windows sourcetype="WinEventLog:Security" EventCode=4698
+| where Task_Name!="\\Microsoft\\*"
+| rex field=Task_Content "(?i)<Command>(?<task_command>[^<]+)"
+| where task_command LIKE "%powershell%" OR task_command LIKE "%cmd.exe%"
+    OR task_command LIKE "%wscript%" OR task_command LIKE "%mshta%"
+    OR task_command LIKE "%\\AppData%"
+    OR task_command LIKE "%\\Temp%"
+| stats count values(task_command) as commands values(Task_Name) as tasks by Account_Name, ComputerName
+| sort -_time
+
+` === Scenario 2: Registry run key modification ===
+` Detects additions to common auto-start registry locations
+index=windows sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=13
+| where (TargetObject LIKE "%\\CurrentVersion\\Run%" OR TargetObject LIKE "%\\CurrentVersion\\RunOnce%"
+    OR TargetObject LIKE "%\\CurrentVersion\\Explorer\\Shell Folders%")
+    AND EventType="SetValue"
+| stats count values(Details) as values values(Image) as source_process by TargetObject, User, ComputerName
+| sort -_time
+
+` === Scenario 3: New user account creation ===
+` Detects creation of local or domain accounts outside normal provisioning
+index=windows sourcetype="WinEventLog:Security" (EventCode=4720 OR EventCode=4722)
+| where NOT src_user IN ("SYSTEM", "sccm_svc", "provisioning_svc")
+| stats count values(Account_Name) as new_accounts by src_user, ComputerName, _time
+| sort -_time
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Whitelist known scheduled tasks by name and hash
+` - Maintain approved registry modifications from GPO
+` - Exclude provisioning systems from account creation alerts
+` - Set time-based suppression for IT change windows
+`
+` FALSE POSITIVES:
+` - Software installations creating scheduled tasks
+` - GPO-deployed registry modifications
+` - IT helpdesk creating accounts per ticket
+` - Windows Update-related scheduled tasks
+` ============================================================

@@ -1,0 +1,60 @@
+` ============================================================
+` Title: Reconnaissance Detection
+` Description: Detects internal and external reconnaissance activity
+`              including network scanning, AD enumeration, and service discovery.
+` MITRE ATT&CK: T1595 (Active Scanning), T1592 (Gather Victim Host Info),
+`               T1589 (Gather Victim Identity Info), T1590 (Gather Victim Network Info)
+` Severity: Medium
+` Data Sources: Firewall/IDS logs, Windows Security (4661, 4662),
+`              Sysmon (Event 1), DNS logs, NetFlow
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: Internal port scanning ===
+` Detects a single host contacting many ports or hosts in short timeframe
+index=network sourcetype=firewall
+| where action="blocked" OR action="denied"
+| bin _time span=5m
+| stats dc(dest_port) as unique_ports dc(dest_ip) as unique_hosts count by src_ip, _time
+| where unique_ports > 50 OR unique_hosts > 20
+| eval scan_type=case(unique_ports>50 AND unique_hosts<=3, "Vertical Scan",
+    unique_hosts>20 AND unique_ports<=5, "Horizontal Scan",
+    true(), "Mixed Scan")
+| sort -count
+
+` === Scenario 2: Active Directory enumeration ===
+` Detects LDAP/AD enumeration tools like BloodHound, ADRecon
+index=windows sourcetype="WinEventLog:Security" EventCode=4662
+| where ObjectType="*domain*" OR ObjectType="*groupPolicyContainer*"
+| bin _time span=10m
+| stats count dc(ObjectName) as objects_accessed by Account_Name, ComputerName, _time
+| where objects_accessed > 100
+| sort -objects_accessed
+
+` === Scenario 3: Network discovery command execution ===
+` Detects execution of built-in recon commands
+index=windows sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+| where Image LIKE "%net.exe" OR Image LIKE "%nltest.exe"
+    OR Image LIKE "%dsquery.exe" OR Image LIKE "%nslookup.exe"
+    OR Image LIKE "%ipconfig.exe" OR Image LIKE "%systeminfo.exe"
+    OR Image LIKE "%whoami.exe" OR Image LIKE "%arp.exe"
+    OR Image LIKE "%nbtstat.exe"
+| bin _time span=5m
+| stats dc(Image) as unique_tools values(Image) as tools values(CommandLine) as commands by User, ComputerName, _time
+| where unique_tools >= 3
+| sort -unique_tools
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Exclude vulnerability scanners and network monitoring tools by IP
+` - Baseline normal LDAP query volumes per service account
+` - Whitelist IT admin workstations for recon command usage
+` - Tune port/host thresholds based on network architecture
+`
+` FALSE POSITIVES:
+` - Authorized vulnerability scanners (Nessus, Qualys)
+` - Network monitoring tools (PRTG, SolarWinds)
+` - IT administrators performing routine diagnostics
+` - SCCM/Intune client discovery processes
+` ============================================================

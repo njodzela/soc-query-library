@@ -1,0 +1,52 @@
+// ============================================================
+// Title: Privilege Escalation Detection
+// Description: Detects Azure AD role assignments, local admin additions,
+//              and exploitation of misconfigured permissions.
+// MITRE ATT&CK: T1068, T1548.002, T1134, T1078.002
+// Severity: Critical
+// Data Sources: AuditLogs, SecurityEvent, AzureActivity
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Azure AD privileged role assignment ===
+AuditLogs
+| where TimeGenerated > ago(24h)
+| where OperationName == "Add member to role"
+| extend RoleName = tostring(TargetResources[0].displayName)
+| where RoleName in ("Global Administrator", "Privileged Role Administrator",
+    "Exchange Administrator", "SharePoint Administrator",
+    "Application Administrator", "Security Administrator")
+| extend Actor = tostring(InitiatedBy.user.userPrincipalName)
+| extend Target = tostring(TargetResources[0].userPrincipalName)
+| project TimeGenerated, Actor, Target, RoleName, CorrelationId
+
+// === Scenario 2: Local admin group modification ===
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID in (4732, 4728)  // Member added to local/global security group
+| where TargetAccount has "Administrators" or TargetAccount has "Domain Admins"
+| project TimeGenerated, Account, MemberName, TargetAccount, Computer
+
+// === Scenario 3: Suspicious token manipulation via process creation ===
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4688
+| where CommandLine has "runas" or CommandLine has "token::" or CommandLine has "impersonate"
+| where AccountType == "User"
+| summarize count() by Account, CommandLine, Computer, bin(TimeGenerated, 1h)
+| sort by count_ desc
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Integrate with PIM (Privileged Identity Management) for expected elevations
+// - Whitelist authorized admin group managers
+// - Create separate alert for Global Admin assignments (critical)
+// - Correlate with change management tickets
+//
+// FALSE POSITIVES:
+// - PIM-activated role assignments (expected behavior)
+// - IT onboarding adding users to admin groups per policy
+// - Automated provisioning systems
+// - Authorized runas for admin tasks
+// ============================================================

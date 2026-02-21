@@ -1,0 +1,135 @@
+/*
+ * Title:        Brute-Force Detection
+ * Description:  Detects brute-force and password spraying attacks by identifying
+ *               excessive failed authentication attempts from single or multiple sources.
+ * MITRE ATT&CK: T1110.001 (Password Guessing), T1110.003 (Password Spraying), T1110.004 (Credential Stuffing)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Authentication Events (Azure AD, Okta, Google Workspace, On-prem AD)
+ */
+
+// =============================================================================
+// Scenario 1: Single-source brute force — many failed logins from one IP
+// =============================================================================
+rule brute_force_single_source {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects excessive failed login attempts from a single IP address within a short window."
+    severity = "High"
+    mitre_attack = "T1110.001"
+
+  events:
+    // Match failed authentication events
+    $fail.metadata.event_type = "USER_LOGIN"
+    $fail.security_result.action = "BLOCK"
+    $fail.security_result.category = "AUTH_VIOLATION"
+
+    // Group by source IP
+    $fail.principal.ip = $source_ip
+
+    // Target user
+    $fail.target.user.userid = $target_user
+
+  match:
+    // Trigger when 15+ failures from same IP within 10 minutes
+    $source_ip over 10m
+
+  condition:
+    #fail > 15
+
+  outcome:
+    $risk_score = 75
+    $event_count = #fail
+    $target_users = array_distinct($fail.target.user.userid)
+}
+
+// =============================================================================
+// Scenario 2: Password spraying — one or few passwords tried across many accounts
+// =============================================================================
+rule password_spraying_detection {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects password spraying: failed logins to many distinct accounts from one source."
+    severity = "High"
+    mitre_attack = "T1110.003"
+
+  events:
+    $fail.metadata.event_type = "USER_LOGIN"
+    $fail.security_result.action = "BLOCK"
+    $fail.principal.ip = $source_ip
+    $fail.target.user.userid = $target_user
+
+  match:
+    $source_ip over 30m
+
+  condition:
+    // Many distinct users targeted but relatively few attempts per user
+    #fail > 10 and count_distinct($fail.target.user.userid) > 8
+
+  outcome:
+    $risk_score = 85
+    $unique_targets = count_distinct($fail.target.user.userid)
+    $event_count = #fail
+}
+
+// =============================================================================
+// Scenario 3: Credential stuffing — failed logins followed by a success
+// =============================================================================
+rule credential_stuffing_success {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects successful login preceded by multiple failures, indicating credential stuffing."
+    severity = "Critical"
+    mitre_attack = "T1110.004"
+
+  events:
+    // Failed attempts
+    $fail.metadata.event_type = "USER_LOGIN"
+    $fail.security_result.action = "BLOCK"
+    $fail.principal.ip = $source_ip
+
+    // Subsequent success from same IP
+    $success.metadata.event_type = "USER_LOGIN"
+    $success.security_result.action = "ALLOW"
+    $success.principal.ip = $source_ip
+
+    // Success must come after failures
+    $fail.metadata.event_timestamp.seconds < $success.metadata.event_timestamp.seconds
+
+  match:
+    $source_ip over 30m
+
+  condition:
+    #fail > 10 and #success > 0
+
+  outcome:
+    $risk_score = 90
+    $failed_count = #fail
+    $successful_users = array_distinct($success.target.user.userid)
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Adjust the threshold in Scenario 1 (>15) based on your org's baseline.
+ *   High-volume environments may need 25+ to reduce noise.
+ * - For Scenario 2, tune count_distinct threshold (>8) based on org size.
+ * - Exclude known scanner IPs, load balancer IPs, and VPN egress points
+ *   by adding: $fail.principal.ip != "x.x.x.x"
+ * - Consider adding geographic context: alert only on logins from unusual countries.
+ * - For cloud IdPs (Okta, Azure AD), filter on specific application IDs to focus
+ *   on critical applications.
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - Automated monitoring tools that test authentication endpoints
+ * - Shared NAT/VPN IPs where many users authenticate from the same address
+ * - Password reset flows that generate multiple failed attempts
+ * - Service accounts with expired credentials retrying automatically
+ * - Load balancers or proxies that mask individual source IPs
+ * - Mitigation: maintain a reference list of known-good IPs and exclude them
+ */

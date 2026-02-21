@@ -1,0 +1,109 @@
+// =============================================================================
+// Title:        Phishing Indicators Detection
+// Description:  Detects phishing via suspicious email attachments, malicious URLs,
+//               and post-delivery user interaction indicators.
+// MITRE ATT&CK: T1566.001 (Spearphishing Attachment),
+//               T1566.002 (Spearphishing Link), T1598 (Phishing for Information)
+// Severity:     High
+// Platform:     Microsoft Defender (Advanced Hunting)
+// Author:       Christian M. Njodzela
+// Date:         2026-02-21
+// Data Sources:  EmailEvents, EmailAttachmentInfo, EmailUrlInfo, DeviceProcessEvents
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Scenario 1: Suspicious attachment delivery and subsequent execution
+// Correlates email with risky attachments to process launches within 15 min
+// -----------------------------------------------------------------------------
+let SuspiciousExtensions = dynamic([".exe", ".scr", ".js", ".vbs", ".hta",
+    ".bat", ".cmd", ".ps1", ".lnk", ".iso", ".img", ".vhd"]);
+let EmailsWithAttachments = EmailAttachmentInfo
+    | where Timestamp > ago(24h)
+    | where FileType has_any (SuspiciousExtensions)
+        or FileName has_any (SuspiciousExtensions)
+    | project EmailTimestamp = Timestamp, NetworkMessageId, RecipientEmailAddress,
+        FileName, FileType, SHA256;
+let ProcessLaunches = DeviceProcessEvents
+    | where Timestamp > ago(24h)
+    | where FolderPath has_any ("\\Downloads\\", "\\Temp\\",
+        "\\AppData\\Local\\Temp\\")
+    | project ProcessTime = Timestamp, DeviceName, AccountName,
+        FileName, FolderPath, ProcessCommandLine, SHA256;
+EmailsWithAttachments
+| join kind=inner ProcessLaunches on SHA256
+| where ProcessTime between (EmailTimestamp .. (EmailTimestamp + 15m))
+| project RecipientEmailAddress, EmailTimestamp, FileName,
+    DeviceName, AccountName, FolderPath, ProcessCommandLine, ProcessTime;
+
+// -----------------------------------------------------------------------------
+// Scenario 2: Clicks to newly registered or low-reputation URLs from email
+// Identifies email-borne URLs leading to recently created domains
+// -----------------------------------------------------------------------------
+EmailUrlInfo
+| where Timestamp > ago(24h)
+| join kind=inner (
+    EmailEvents
+    | where Timestamp > ago(24h)
+    | where DeliveryAction == "Delivered"
+    | project NetworkMessageId, RecipientEmailAddress, SenderFromAddress, Subject
+) on NetworkMessageId
+// Filter for suspicious URL patterns
+| where Url matches regex @"(?i)(login|signin|verify|secure|account|update|confirm)"
+    or UrlDomain matches regex @"(?i)\d{2,}"  // Domains with many numbers
+| where not(UrlDomain has_any ("microsoft.com", "office.com", "windows.net",
+    "sharepoint.com", "onmicrosoft.com"))
+| summarize
+    ClickedUrls = make_set(Url, 10),
+    Subjects = make_set(Subject, 5)
+    by RecipientEmailAddress, SenderFromAddress, UrlDomain
+| project RecipientEmailAddress, SenderFromAddress, UrlDomain,
+    ClickedUrls, Subjects;
+
+// -----------------------------------------------------------------------------
+// Scenario 3: Email with URL clicked followed by credential entry on external site
+// Detects potential credential harvesting post-email click
+// -----------------------------------------------------------------------------
+let EmailClicks = EmailUrlInfo
+    | where Timestamp > ago(24h)
+    | where UrlLocation == "Body"
+    | join kind=inner (
+        EmailEvents
+        | where Timestamp > ago(24h)
+    ) on NetworkMessageId
+    | project ClickTime = Timestamp, RecipientEmailAddress, Url, UrlDomain;
+let WebTraffic = DeviceNetworkEvents
+    | where Timestamp > ago(24h)
+    | where RemotePort in (80, 443)
+    | where ActionType == "ConnectionSuccess"
+    | project ConnTime = Timestamp, DeviceName, RemoteUrl,
+        RemoteIP, InitiatingProcessAccountName;
+EmailClicks
+| join kind=inner WebTraffic
+    on $left.UrlDomain == $right.RemoteUrl
+| where ConnTime between (ClickTime .. (ClickTime + 10m))
+| project RecipientEmailAddress, ClickTime, Url, UrlDomain,
+    DeviceName, RemoteIP, ConnTime
+| sort by ClickTime desc;
+
+// =============================================================================
+// TUNING RECOMMENDATIONS
+// =============================================================================
+// - Scenario 1: Add organization-approved file types to exclusion list.
+//   Some teams legitimately receive .iso or .img files.
+// - Scenario 2: Expand the corporate domain exclusion list with your
+//   sanctioned SaaS domains (Salesforce, ServiceNow, etc.).
+// - Scenario 3: Requires both email and endpoint data; ensure MDE is
+//   deployed on endpoints receiving email.
+// - Integrate with Safe Links click data for higher fidelity.
+// - Consider excluding known phishing simulation platforms (KnowBe4, Cofense).
+//
+// =============================================================================
+// FALSE POSITIVE GUIDANCE
+// =============================================================================
+// - Phishing simulation campaigns from security awareness vendors
+// - Marketing emails with tracking/redirect links
+// - Legitimate new vendor portals with login pages
+// - URL shortener services resolving to legitimate sites
+// - Auto-opened attachments by email preview features
+// - Mitigation: maintain a list of phishing simulation sender addresses
+// =============================================================================

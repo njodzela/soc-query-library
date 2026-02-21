@@ -1,0 +1,53 @@
+` ============================================================
+` Title: Privilege Escalation Detection
+` Description: Detects attempts to elevate privileges through UAC bypass,
+`              token manipulation, exploitation, and abuse of sudoers.
+` MITRE ATT&CK: T1068 (Exploitation for Privilege Escalation),
+`               T1548.002 (Bypass UAC), T1134 (Access Token Manipulation),
+`               T1078.002 (Valid Accounts: Domain)
+` Severity: Critical
+` Data Sources: Windows Security (4672, 4688), Sysmon (1, 10, 13),
+`              Linux auditd, sudo logs
+` Author: Christian M. Njodzela
+` Date: 2026-02-21
+` ============================================================
+
+` === Scenario 1: UAC bypass via fodhelper or eventvwr ===
+` Detects known UAC bypass techniques using registry modification
+index=windows sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=13
+| where (TargetObject LIKE "%\\Software\\Classes\\ms-settings\\Shell\\Open\\command%"
+    OR TargetObject LIKE "%\\Software\\Classes\\mscfile\\Shell\\Open\\command%")
+| stats count values(Details) as registry_values values(Image) as processes by ComputerName, User, _time
+| sort -_time
+
+` === Scenario 2: Suspicious privilege assignment ===
+` Detects assignment of sensitive privileges (SeDebugPrivilege, SeTcbPrivilege)
+index=windows sourcetype="WinEventLog:Security" EventCode=4672
+| where NOT Account_Name IN ("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE")
+| search Privileges="*SeDebugPrivilege*" OR Privileges="*SeTcbPrivilege*"
+    OR Privileges="*SeImpersonatePrivilege*"
+| stats count values(Privileges) as privileges by Account_Name, ComputerName
+| where count > 3
+| sort -count
+
+` === Scenario 3: Linux sudo abuse or sudoers modification ===
+` Detects unauthorized sudo usage and sudoers file changes
+index=linux sourcetype=linux:audit
+| where (command="sudo" AND result!="success")
+    OR (object="/etc/sudoers" AND action="write")
+| stats count values(command) as commands by user, host
+| sort -count
+
+` ============================================================
+` TUNING RECOMMENDATIONS:
+` - Whitelist accounts that legitimately receive SeDebugPrivilege
+` - Baseline which accounts use sudo regularly
+` - Exclude known admin tools that trigger UAC registry writes
+` - Tune privilege assignment threshold per role
+`
+` FALSE POSITIVES:
+` - Debugging tools legitimately requesting SeDebugPrivilege
+` - System Center or antivirus using elevated tokens
+` - Authorized sudoers changes during config management
+` - Developer tools running with elevated privileges
+` ============================================================

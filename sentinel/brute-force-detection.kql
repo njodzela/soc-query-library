@@ -1,0 +1,74 @@
+// ============================================================
+// Title: Brute-Force Login Detection
+// Description: Detects multiple failed sign-ins followed by success,
+//              password spraying across Azure AD, and MFA fatigue attacks.
+// MITRE ATT&CK: T1110.001, T1110.003, T1110.004
+// Severity: High
+// Data Sources: SigninLogs, AADNonInteractiveUserSignInLogs, SecurityEvent
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Azure AD brute force with subsequent success ===
+// Failed logins from same IP followed by a successful sign-in
+let timeframe = 30m;
+let failure_threshold = 10;
+SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where ResultType != "0"  // Non-zero = failure
+| summarize
+    FailureCount = count(),
+    FailedApps = dcount(AppDisplayName),
+    FailedAccounts = dcount(UserPrincipalName),
+    Accounts = make_set(UserPrincipalName, 10)
+    by IPAddress, bin(TimeGenerated, timeframe)
+| where FailureCount > failure_threshold
+| join kind=inner (
+    SigninLogs
+    | where TimeGenerated > ago(timeframe)
+    | where ResultType == "0"  // Successful login
+    | project SuccessTime = TimeGenerated, IPAddress, UserPrincipalName
+) on IPAddress
+| project IPAddress, FailureCount, FailedAccounts, Accounts, SuccessTime, UserPrincipalName
+
+// === Scenario 2: Password spraying — one IP targeting many accounts ===
+// Single source attempting many accounts with few attempts each
+SigninLogs
+| where TimeGenerated > ago(1h)
+| where ResultType in ("50126", "50053", "50055")  // Invalid password codes
+| summarize
+    AttemptCount = count(),
+    UniqueAccounts = dcount(UserPrincipalName),
+    AccountList = make_set(UserPrincipalName, 25)
+    by IPAddress, bin(TimeGenerated, 15m)
+| where UniqueAccounts > 10 and AttemptCount > 20
+| sort by UniqueAccounts desc
+
+// === Scenario 3: MFA fatigue / push bombing ===
+// Multiple MFA prompts denied then one accepted
+SigninLogs
+| where TimeGenerated > ago(1h)
+| where ResultType == "500121"  // MFA denied
+| summarize DeniedCount = count() by UserPrincipalName, IPAddress, bin(TimeGenerated, 30m)
+| where DeniedCount > 5
+| join kind=inner (
+    SigninLogs
+    | where TimeGenerated > ago(1h)
+    | where ResultType == "0" and AuthenticationRequirement == "multiFactorAuthentication"
+    | project UserPrincipalName, SuccessTime = TimeGenerated, IPAddress
+) on UserPrincipalName, IPAddress
+| project UserPrincipalName, IPAddress, DeniedCount, SuccessTime
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Adjust failure_threshold based on environment (10 is conservative)
+// - Exclude known load balancer IPs and VPN concentrators
+// - Filter trusted named locations using LocationDetails
+// - Add | where UserPrincipalName !endswith "@partner.domain.com" for B2B
+//
+// FALSE POSITIVES:
+// - Users with expired passwords retrying after reset
+// - Automated service principals with credential rotation
+// - Conditional access policy testing
+// - SSO misconfigurations causing repeated auth failures
+// ============================================================

@@ -1,0 +1,132 @@
+/*
+ * Title:        Persistence Mechanisms Detection
+ * Description:  Detects persistence via scheduled tasks, registry run keys,
+ *               new local accounts, and Windows service creation.
+ * MITRE ATT&CK: T1053.005 (Scheduled Task), T1547.001 (Registry Run Keys), T1136 (Create Account), T1543.003 (Windows Service)
+ * Severity:     High
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Process Events, Registry Events, Windows Security Logs (4698, 4720, 7045), Sysmon
+ */
+
+// =============================================================================
+// Scenario 1: Scheduled task creation via schtasks.exe or PowerShell
+// =============================================================================
+rule persistence_scheduled_task {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects scheduled task creation that may indicate persistence."
+    severity = "High"
+    mitre_attack = "T1053.005"
+
+  events:
+    $task.metadata.event_type = "PROCESS_LAUNCH"
+    $task.principal.hostname = $host
+
+    // schtasks.exe with /create flag
+    re.regex($task.target.process.file.full_path, `(?i)schtasks\.exe$`)
+    re.regex($task.target.process.command_line, `(?i)/create`)
+
+    // Exclude SYSTEM creating routine tasks
+    not re.regex($task.principal.user.userid, `(?i)SYSTEM`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #task > 0
+
+  outcome:
+    $risk_score = 70
+    $commands = array_distinct($task.target.process.command_line)
+    $users = array_distinct($task.principal.user.userid)
+}
+
+// =============================================================================
+// Scenario 2: Registry Run key modification
+// =============================================================================
+rule persistence_registry_run_key {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects modification of registry Run/RunOnce keys for persistence."
+    severity = "High"
+    mitre_attack = "T1547.001"
+
+  events:
+    $reg.metadata.event_type = "REGISTRY_MODIFICATION"
+    $reg.principal.hostname = $host
+
+    // Run/RunOnce registry paths
+    re.regex($reg.target.registry.registry_key, `(?i)(\\CurrentVersion\\Run|\\CurrentVersion\\RunOnce|\\CurrentVersion\\RunServices)`)
+
+    $reg.principal.user.userid = $user
+
+  match:
+    $host over 1h
+
+  condition:
+    #reg > 0
+
+  outcome:
+    $risk_score = 75
+    $registry_keys = array_distinct($reg.target.registry.registry_key)
+    $registry_values = array_distinct($reg.target.registry.registry_value_data)
+    $users = array_distinct($reg.principal.user.userid)
+}
+
+// =============================================================================
+// Scenario 3: New Windows service installed from unusual path
+// =============================================================================
+rule persistence_suspicious_service {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects new Windows service creation with binaries from non-standard paths."
+    severity = "High"
+    mitre_attack = "T1543.003"
+
+  events:
+    $svc.metadata.event_type = "PROCESS_LAUNCH"
+    $svc.principal.hostname = $host
+
+    // sc.exe creating a service
+    re.regex($svc.target.process.file.full_path, `(?i)sc\.exe$`)
+    re.regex($svc.target.process.command_line, `(?i)\bcreate\b`)
+
+    // Service binary NOT from standard paths
+    not re.regex($svc.target.process.command_line, `(?i)(\\Windows\\System32|\\Program Files|\\Program Files \(x86\))`)
+
+  match:
+    $host over 1h
+
+  condition:
+    #svc > 0
+
+  outcome:
+    $risk_score = 80
+    $commands = array_distinct($svc.target.process.command_line)
+    $users = array_distinct($svc.principal.user.userid)
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Scenario 1: Exclude known software deployment tools (SCCM, PDQ Deploy)
+ *   that create scheduled tasks as part of normal operations.
+ * - Scenario 2: Filter out known legitimate registry entries from endpoint
+ *   management tools (e.g., antivirus, VPN clients).
+ * - Scenario 3: Build an allow-list of approved service binary paths specific
+ *   to your organization's software catalog.
+ * - Consider adding Sysmon Event ID 1 (process create) for richer command-line data.
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - Software installations that register Run keys or services
+ * - Windows Update creating scheduled tasks for maintenance
+ * - IT management tools (SCCM, Intune) deploying configurations
+ * - Antivirus/EDR agents creating services during installation
+ * - GPO-deployed startup scripts
+ * - Mitigation: baseline known services and scheduled tasks per system role
+ */

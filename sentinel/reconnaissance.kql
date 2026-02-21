@@ -1,0 +1,66 @@
+// ============================================================
+// Title: Reconnaissance Detection
+// Description: Detects port scanning, AD enumeration, and internal
+//              network discovery activities.
+// MITRE ATT&CK: T1595, T1592, T1589, T1590
+// Severity: Medium
+// Data Sources: CommonSecurityLog, SecurityEvent, DeviceProcessEvents
+// Author: Christian M. Njodzela
+// Date: 2026-02-21
+// ============================================================
+
+// === Scenario 1: Internal port scanning ===
+CommonSecurityLog
+| where TimeGenerated > ago(1h)
+| where DeviceAction in ("Deny", "Drop", "Block")
+| summarize
+    UniquePorts = dcount(DestinationPort),
+    UniqueHosts = dcount(DestinationIP),
+    TotalAttempts = count()
+    by SourceIP, bin(TimeGenerated, 5m)
+| where UniquePorts > 50 or UniqueHosts > 20
+| extend ScanType = case(
+    UniquePorts > 50 and UniqueHosts <= 3, "Vertical Scan",
+    UniqueHosts > 20 and UniquePorts <= 5, "Horizontal Scan",
+    "Mixed Scan")
+| sort by TotalAttempts desc
+
+// === Scenario 2: AD enumeration — LDAP query spike ===
+SecurityEvent
+| where TimeGenerated > ago(1h)
+| where EventID == 4662
+| where ObjectType has "domain" or ObjectType has "groupPolicyContainer"
+| summarize
+    ObjectsAccessed = dcount(ObjectName),
+    TotalQueries = count()
+    by Account, Computer, bin(TimeGenerated, 10m)
+| where ObjectsAccessed > 100
+| sort by ObjectsAccessed desc
+
+// === Scenario 3: Network discovery tool execution ===
+DeviceProcessEvents
+| where TimeGenerated > ago(1h)
+| where FileName in~ ("net.exe", "nltest.exe", "dsquery.exe", "nslookup.exe",
+    "ipconfig.exe", "systeminfo.exe", "whoami.exe", "arp.exe",
+    "net1.exe", "cmdkey.exe", "nbtstat.exe")
+| summarize
+    UniqueTools = dcount(FileName),
+    Tools = make_set(FileName, 15),
+    Commands = make_set(ProcessCommandLine, 15)
+    by AccountName, DeviceName, bin(TimeGenerated, 5m)
+| where UniqueTools >= 3
+| sort by UniqueTools desc
+
+// ============================================================
+// TUNING RECOMMENDATIONS:
+// - Exclude vulnerability scanner IPs from port scan detection
+// - Baseline LDAP query volume per service account
+// - Whitelist admin workstations for discovery tool usage
+// - Adjust thresholds based on network size
+//
+// FALSE POSITIVES:
+// - Vulnerability scanners (Qualys, Nessus, Rapid7)
+// - Network monitoring tools
+// - IT admins running diagnostic commands
+// - SCCM client discovery
+// ============================================================

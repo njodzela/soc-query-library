@@ -1,0 +1,130 @@
+/*
+ * Title:        Privilege Escalation Detection
+ * Description:  Detects privilege escalation via exploitation, UAC bypass,
+ *               access token manipulation, and abuse of valid accounts.
+ * MITRE ATT&CK: T1068 (Exploitation for Privilege Escalation), T1548.002 (UAC Bypass), T1134 (Access Token Manipulation), T1078.002 (Domain Accounts)
+ * Severity:     Critical
+ * Platform:     Google SecOps (Chronicle)
+ * Author:       Christian M. Njodzela
+ * Date:         2026-02-21
+ * Data Sources:  UDM Process Events, Windows Security Logs (4672, 4673, 4688), EDR Telemetry
+ */
+
+// =============================================================================
+// Scenario 1: UAC bypass via fodhelper or eventvwr
+// =============================================================================
+rule privesc_uac_bypass {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects UAC bypass techniques using auto-elevating Windows binaries."
+    severity = "Critical"
+    mitre_attack = "T1548.002"
+
+  events:
+    $proc.metadata.event_type = "PROCESS_LAUNCH"
+    $proc.principal.hostname = $host
+
+    // Known UAC bypass parent processes
+    re.regex($proc.principal.process.file.full_path, `(?i)(fodhelper\.exe|eventvwr\.exe|computerdefaults\.exe|sdclt\.exe)`)
+
+    // Child process is NOT expected (should be mmc.exe for eventvwr, etc.)
+    not re.regex($proc.target.process.file.full_path, `(?i)(mmc\.exe|control\.exe)`)
+
+  match:
+    $host over 5m
+
+  condition:
+    #proc > 0
+
+  outcome:
+    $risk_score = 95
+    $parent_processes = array_distinct($proc.principal.process.file.full_path)
+    $child_processes = array_distinct($proc.target.process.file.full_path)
+}
+
+// =============================================================================
+// Scenario 2: Suspicious privilege assignment (SeDebugPrivilege, SeTcbPrivilege)
+// =============================================================================
+rule privesc_sensitive_privilege {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects assignment of highly sensitive privileges to non-system accounts."
+    severity = "High"
+    mitre_attack = "T1134"
+
+  events:
+    $priv.metadata.event_type = "USER_RESOURCE_ACCESS"
+    $priv.principal.user.userid = $user
+    $priv.principal.hostname = $host
+
+    // Windows Event ID 4672 — Special privileges assigned
+    $priv.metadata.product_event_type = "4672"
+
+    // Not a built-in system account
+    not re.regex($priv.principal.user.userid, `(?i)(SYSTEM|LOCAL SERVICE|NETWORK SERVICE)`)
+
+  match:
+    $user over 1h
+
+  condition:
+    #priv > 0
+
+  outcome:
+    $risk_score = 75
+    $hosts = array_distinct($priv.principal.hostname)
+    $event_count = #priv
+}
+
+// =============================================================================
+// Scenario 3: New admin account added to privileged group
+// =============================================================================
+rule privesc_admin_group_addition {
+  meta:
+    author = "Christian M. Njodzela"
+    description = "Detects user accounts being added to privileged groups (Domain Admins, Enterprise Admins, etc.)."
+    severity = "Critical"
+    mitre_attack = "T1078.002"
+
+  events:
+    $add.metadata.event_type = "GROUP_MODIFICATION"
+    $add.principal.user.userid = $actor
+
+    // Privileged group names
+    re.regex($add.target.group.group_display_name, `(?i)(Domain Admins|Enterprise Admins|Schema Admins|Administrators|Account Operators|Backup Operators)`)
+
+    $add.target.user.userid = $added_user
+
+  match:
+    $actor over 1h
+
+  condition:
+    #add > 0
+
+  outcome:
+    $risk_score = 90
+    $groups_modified = array_distinct($add.target.group.group_display_name)
+    $users_added = array_distinct($add.target.user.userid)
+}
+
+/*
+ * =============================================================================
+ * TUNING RECOMMENDATIONS
+ * =============================================================================
+ * - Scenario 1: Expand the parent process list as new UAC bypass techniques
+ *   are discovered. Check LOLBAS project for updates.
+ * - Scenario 2: Filter to specific sensitive privileges (SeDebugPrivilege,
+ *   SeTcbPrivilege, SeImpersonatePrivilege) if Event ID 4672 is too noisy.
+ * - Scenario 3: Add your organization's custom privileged groups.
+ * - Exclude known change management accounts that perform authorized admin changes.
+ * - Correlate with change tickets for group modifications.
+ *
+ * =============================================================================
+ * FALSE POSITIVE GUIDANCE
+ * =============================================================================
+ * - IT administrators performing authorized privilege escalation during maintenance
+ * - Automated provisioning systems (SCIM, HR-driven) modifying group membership
+ * - Software installers that request elevated privileges via UAC
+ * - Service accounts that legitimately hold SeImpersonatePrivilege
+ * - Domain join operations that trigger group modifications
+ * - Mitigation: correlate with ITSM tickets and scheduled change windows
+ */
